@@ -48,6 +48,14 @@ on the release") and draft replies to new emails and messages.
   - ESLint 9, since eslint-plugin-react doesn't support 10. TypeScript 5.9, since typescript-eslint supports only
     TypeScript below 6.1.
   - `@vitejs/plugin-react` pinned to 6.1.2: 6.2.0 and 6.2.1 came out the day the repo was made.
+- **UI: Tailwind and shadcn/ui (Radix) instead of MUI** ([The app](#the-app)).
+  - For: styles are a CSS file, so there's no styling at runtime while an answer streams, and the CSP needs no inline
+    styles until the components below come. The components are the repo's own code, with no MUI major upgrades. A
+    date range picker is free (MUI's is in the paid MUI X Pro).
+  - Against: a stack other than the extension's. Its `helpers/theme.ts` and `components/MarkdownText.tsx` are ported,
+    not copied.
+  - `cn` from the `cn` package (shadcn's replacement for clsx and tailwind-merge), which the shadcn registry's
+    components import. Pinned to 0.5.1: 0.5.2 came out the same day.
 
 ## Why Electron, with a core of its own
 
@@ -87,10 +95,17 @@ Alternatives considered:
 ### The app
 
 - **Renderer.**
-  - React and MUI, starting from copies of the extension's `helpers/theme.ts` (Meet's palette) and
-    `components/MarkdownText.tsx` (raw HTML shown as text).
+  - React, Tailwind and shadcn/ui (Radix).
+    - Meet's palette from the extension's `helpers/theme.ts` is shadcn's CSS variables in
+      `app/renderer/src/index.css`.
+    - The extension's `components/MarkdownText.tsx` (raw HTML shown as text) is ported to Tailwind's typography
+      plugin (`prose`).
   - `contextIsolation` and `sandbox` on, no `nodeIntegration`; the preload exposes a short list of IPC calls.
-  - A CSP of `'self'`; `setWindowOpenHandler` denies new windows and `will-navigate` is blocked.
+  - A CSP of `'self'`, for styles too; `setWindowOpenHandler` denies new windows and `will-navigate` is blocked.
+    - Radix's scroll lock (Dialog, Select, DropdownMenu, through `react-remove-scroll`) and sonner's toasts add
+      `<style>` tags, which that CSP blocks.
+    - With the first of them, styles get a nonce (`react-style-singleton` reads it with `get-nonce`) or
+      `'unsafe-inline'`.
 - **Untrusted content.** Emails and messages are written by other people.
   - They're shown as the text that was indexed, or as HTML in an `<iframe sandbox>` without scripts and with remote
     images blocked (tracking pixels).
@@ -320,8 +335,8 @@ The knowledge base is this repo, `stenograma-knowledge-base`, checked out next t
   - The extension repo's release machinery is the extension's: `v*` tags, `yarn release`, `git archive` for the AMO
     source package, `eslint .` and a tsconfig over every file. Each would need an exception for the app, and
     Electron's native modules would slow its CI.
-  - Shared UI files would import `react` and `@mui/material` from the extension's `node_modules`, and the app's own
-    code from its own, giving two copies of React and MUI in the renderer.
+  - Shared UI files would import `react` from the extension's `node_modules`, and the app's own code from its own,
+    giving two copies of React in the renderer. The extension's UI is MUI too, and the app's is Tailwind.
   - It's the published extension's repo. Its privacy policy says data goes only to the AI providers the user chose,
     and code reading Outlook, Telegram and Slack next to it would confuse users and store reviewers.
 - **Not linked.** A submodule, subtree or git dependency would share only the payload types. It would cost clones with
@@ -332,8 +347,8 @@ The knowledge base is this repo, `stenograma-knowledge-base`, checked out next t
   - **A contract fixture.** An extension test builds a push from fixture rows and compares it with
     `tests/fixtures/kb-ingest.json`. The core keeps a copy of that file and tests that it ingests it. A change to the
     payload changes the fixture, and its diff is the reminder to raise `apiVersion` and copy the file over.
-  - Copied once, then the app's own: `helpers/theme.ts`, `components/MarkdownText.tsx`, and `INPUT_TOKEN_BUDGET` with
-    `estimateTokens` from `background.ts`.
+  - Copied once, then the app's own: `INPUT_TOKEN_BUDGET` with `estimateTokens` from `background.ts`. The palette of
+    `helpers/theme.ts` and `components/MarkdownText.tsx` are ported to Tailwind ([The app](#the-app)).
 - **Working on both sides** in Claude Code: the two repos side by side, and `claude --add-dir ../stenograma` (or
   `/add-dir`) here.
 - **Docs.** This plan lives here, and the extension's privacy rules are in this repo's

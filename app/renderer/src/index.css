@@ -1,0 +1,113 @@
+@import 'tailwindcss';
+/* The enter and exit animations of shadcn/ui components */
+@import 'tw-animate-css';
+
+/* Dark mode follows the .dark class on <html>, as shadcn/ui expects */
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * The palette, as the CSS variables shadcn/ui components use. It comes from the extension's helpers/theme.ts:
+ * dark is Google Meet's in-call UI, light is MUI's default light palette, which the extension's light theme used.
+ * bubble, code and canvas are the extension's own tokens.
+ */
+:root {
+  --radius: 0.5rem;
+  --background: #ffffff;
+  --foreground: #212121;
+  --card: #ffffff;
+  --card-foreground: #212121;
+  --popover: #ffffff;
+  --popover-foreground: #212121;
+  --primary: #1976d2;
+  --primary-foreground: #ffffff;
+  --secondary: #f5f5f5;
+  --secondary-foreground: #212121;
+  --muted: #f5f5f5;
+  --muted-foreground: #666666;
+  --accent: #f5f5f5;
+  --accent-foreground: #212121;
+  --destructive: #d32f2f;
+  --success: #2e7d32;
+  --warning: #ed6c02;
+  --border: #e0e0e0;
+  --input: #c4c4c4;
+  --ring: #1976d2;
+  /* Message and answer bubbles that aren't the user's own */
+  --bubble: #f5f5f5;
+  /* Code in AI answers, shown inside a bubble */
+  --code: #e8eaed;
+  /* Page background */
+  --canvas: #f5f5f5;
+}
+
+.dark {
+  --background: #202124;
+  --foreground: #e8eaed;
+  --card: #292a2d;
+  --card-foreground: #e8eaed;
+  --popover: #292a2d;
+  --popover-foreground: #e8eaed;
+  --primary: #8ab4f8;
+  --primary-foreground: #202124;
+  --secondary: #3c4043;
+  --secondary-foreground: #e8eaed;
+  --muted: #3c4043;
+  --muted-foreground: #9aa0a6;
+  --accent: #3c4043;
+  --accent-foreground: #e8eaed;
+  --destructive: #f28b82;
+  --success: #81c995;
+  --warning: #fdd663;
+  --border: #3c4043;
+  --input: #5f6368;
+  --ring: #8ab4f8;
+  --bubble: #3c4043;
+  --code: #202124;
+  --canvas: #202124;
+}
+
+@theme {
+  /* Google Sans where it's installed, else the next fonts */
+  --font-sans: 'Google Sans', Roboto, Arial, sans-serif;
+}
+
+/* Utilities such as bg-primary or text-muted-foreground, from the variables above */
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-bubble: var(--bubble);
+  --color-code: var(--code);
+  --color-canvas: var(--canvas);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}

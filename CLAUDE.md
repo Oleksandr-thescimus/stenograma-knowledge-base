@@ -32,10 +32,18 @@ Uses yarn (`yarn.lock`).
 - `app/main`: Electron's main process.
 - `app/preload`: exposes `window.kb` to the renderer through `contextBridge`. Its type, `KbApi` in
   `app/preload/api.ts`, is shared with the renderer.
-- `app/renderer`: React and MUI. `src/theme.ts` started as a copy of the extension's `helpers/theme.ts`.
+- `app/renderer`: React, Tailwind and shadcn/ui. `@` is `app/renderer/src`.
+  - `src/index.css` holds the palette as the CSS variables shadcn/ui uses: Meet's (dark, the default) and MUI's light
+    one, both from the extension's `helpers/theme.ts`.
+  - Components come from `npx shadcn@latest add <name>` into `src/components/ui` (`components.json`). Run
+    `yarn lint:fix` after it: the registry's code has double quotes and no semicolons. They import `cn` from the `cn`
+    package.
 - `tests/`: Vitest.
 
 electron-vite reads the entries from `electron.vite.config.ts`, since they aren't in its default `src/`.
+
+Packages go to `devDependencies`, so Vite bundles them. `dependencies` is only for what can't be bundled, such as
+native modules (better-sqlite3): electron-vite leaves those external and electron-builder packs them into the app.
 
 ## The renderer is untrusted
 
@@ -43,7 +51,9 @@ It will show emails and messages written by other people, so:
 
 - `contextIsolation` and `sandbox` stay on and `nodeIntegration` off. The renderer reaches the main process only
   through `window.kb`, so keep that a short list of calls with checked arguments.
-- The CSP in `app/renderer/index.html` allows only the app's own scripts.
+- The CSP in `app/renderer/index.html` allows only the app's own scripts and styles; only the dev server allows
+  inline styles (`electron.vite.config.ts`). Radix components with a scroll lock (Dialog, Select, DropdownMenu) and
+  sonner add `<style>` tags, which it blocks: the plan's "The app" says what to do when the first of them comes.
 - No new windows and no navigation away from the app's page. Links open in the default browser, `http(s):` and
   `mailto:` only.
 - A packaged app never loads `ELECTRON_RENDERER_URL`.

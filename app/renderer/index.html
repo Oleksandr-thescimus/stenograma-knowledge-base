@@ -1,12 +1,13 @@
 <!doctype html>
-<html lang="en">
+<!-- Dark, like the extension's default. A theme setting comes with the app's settings (M3) -->
+<html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
     <title>Stenograma KB</title>
-    <!-- Emotion (MUI) adds <style> tags, hence 'unsafe-inline' for styles only -->
+    <!-- Styles too come only from the app's CSS file. The dev server is the exception (electron.vite.config.ts) -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:"
     />
   </head>
   <body>

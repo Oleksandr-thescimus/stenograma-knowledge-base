@@ -11,7 +11,8 @@
     "noFallthroughCasesInSwitch": true,
     "isolatedModules": true,
     "resolveJsonModule": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "paths": { "@/*": ["./app/renderer/src/*"] }
   },
   "include": ["app/renderer/src/**/*", "app/preload/api.ts"]
 }
