@@ -1,0 +1,23 @@
+# yarn dist: an AppImage and a .deb, unsigned and without auto-update (docs/PLAN.md, "The app")
+appId: com.stenograma.kb
+productName: Stenograma KB
+directories:
+  output: dist
+# electron-vite's build; package.json is always included, and node_modules holds only the "dependencies"
+files:
+  - out/**/*
+linux:
+  target:
+    - AppImage
+    - deb
+  executableName: stenograma-kb
+  # The window's WM_CLASS matches the .desktop file (package.json "desktopName"), so GNOME links the two
+  syncDesktopName: true
+  category: Office
+  maintainer: Oleksandr-thescimus <oleksandr.pahutiak@gmail.com>
+appImage:
+  artifactName: ${name}-${version}.${ext}
+deb:
+  artifactName: ${name}_${version}_${arch}.${ext}
+# No publishing: electron-builder would otherwise pick GitHub from "repository" when it runs in CI on a tag
+publish: null
