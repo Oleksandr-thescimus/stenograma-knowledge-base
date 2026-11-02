@@ -39,6 +39,8 @@ on the release") and draft replies to new emails and messages.
   running there's no draft, and the queue says why ([F9](#functional)).
 - **Groq's free tier:** a second question within a minute waits for the rate limit, and the chat shows the wait
   ([N3](#non-functional)).
+- **Languages: Ukrainian and English.** Russian is dropped: no Russian patterns for quoted replies, no `ё` → `е`
+  folding and no Russian endings in BM25 ([F2, F5](#functional), [BM25](#architecture)).
 - **The skeleton of the repo**, ahead of M1: electron-vite with main, preload and renderer in `app/`, TypeScript,
   ESLint with the extension's rules, Vitest under Electron's Node, CI, and electron-builder for an AppImage and a
   `.deb`.
@@ -138,7 +140,7 @@ Alternatives considered:
   - Changes and deletions reach the knowledge base within 5 minutes while the browser and the app are open.
 - **F2. Email (Gmail, Outlook).**
   - One document per message, linked to its thread.
-  - Quoted replies and signatures are stripped, with UA/RU/EN patterns ("Від:", "От:", "On … wrote:", "-----Original
+  - Quoted replies and signatures are stripped, with UA/EN patterns ("Від:", "On … wrote:", "-----Original
     Message-----").
   - Backfill of the last 12 months (configurable), without Spam, Trash, Promotions and Social.
   - Senders can be excluded; the status lists the senders with the most documents, to find noise (notifications,
@@ -160,7 +162,7 @@ Alternatives considered:
   - A date range filters. A person only raises the rank of chunks whose author or participants match, since one person
     is written differently in Meet, email and Telegram and there's no people directory in v1. Names are compared
     lower-cased, with Cyrillic transliterated to Latin.
-  - Ukrainian, Russian and English, mixed.
+  - Ukrainian and English, mixed.
 - **F6. Answers.**
   - Streamed, with `[n]` citations linking to the source (a meeting at the cited moment, an email, a message).
   - It says so when the sources don't contain the answer.
@@ -286,11 +288,9 @@ without approval, a people directory that joins one person's names across source
   The default is picked in M0 with the golden set. Gemini API's free tier may use what it's sent to improve
   Google's products, so email and chats go to it only on a paid tier or with `cloudAllowed`. Groq has no embeddings.
 - **BM25 for Ukrainian.**
-  - FTS5 with `unicode61`. Its `remove_diacritics` covers Latin letters only, so text and queries are normalized first:
-    - the apostrophes `'`, `’` and `` ` `` become `ʼ` (U+02BC). `unicode61` takes `ʼ` as a letter, while `'` and `’`
-      split "п'ять" into "п" and "ять";
-    - `ё` becomes `е`.
-  - A query word of 5+ letters loses one ending from a fixed Ukrainian / Russian list, the longest that leaves at least
+  - FTS5 with `unicode61`. Text and queries are normalized first: the apostrophes `'`, `’` and `` ` `` become `ʼ`
+    (U+02BC). `unicode61` takes `ʼ` as a letter, while `'` and `’` split "п'ять" into "п" and "ять".
+  - A query word of 5+ letters loses one ending from a fixed Ukrainian list, the longest that leaves at least
     4 letters, and is matched as a prefix ("бюджету" → `бюджет*`).
   - Checked on the golden set; the fallback is the `trigram` tokenizer.
 - **Scale.**
