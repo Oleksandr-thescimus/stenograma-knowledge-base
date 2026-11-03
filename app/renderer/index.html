@@ -1,13 +1,17 @@
 <!doctype html>
-<!-- Dark, like the extension's default. A theme setting comes with the app's settings (M3) -->
+<!-- Dark, like the extension's default -->
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
     <title>Stenograma KB</title>
-    <!-- Styles too come only from the app's CSS file. The dev server is the exception (electron.vite.config.ts) -->
+    <!--
+      Scripts come only from the app. Inline styles are allowed: Radix's scroll lock and sonner add <style> tags, and an
+      email's HTML in an <iframe srcdoc> keeps this policy and its inline styles (docs/PLAN.md, Decisions of 2026-11-03).
+      Nothing loads from elsewhere, so a style can't send anything out
+    -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'"
     />
   </head>
   <body>

@@ -148,7 +148,7 @@ export default [
   { files: ['app/renderer/**'], languageOptions: { globals: globals.browser } },
   // core/ never imports Electron and runs in Node, like the main process, the preload and the tests
   {
-    files: ['core/**', 'app/main/**', 'app/preload/**', 'tests/**', '*.{js,mjs,cjs,ts,mts,cts}'],
+    files: ['core/**', 'app/main/**', 'app/core-host/**', 'app/preload/**', 'tests/**', '*.{js,mjs,cjs,ts,mts,cts}'],
     languageOptions: { globals: globals.node },
   },
 ];

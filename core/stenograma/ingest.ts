@@ -32,7 +32,7 @@ const replaceRows = (db: Db, sourceId: number, bundle: SessionBundle) => {
   rows.forEach(({ table, key, row }) => insert.run(sourceId, sessionId, table, key, JSON.stringify(row)));
 };
 
-const readRows = (db: Db, sourceId: number, sessionId: string) => {
+export const readRows = (db: Db, sourceId: number, sessionId: string) => {
   const rows = db.prepare('select table_name as tableName, json from stenograma_rows where source_id = ? and session_id = ?')
     .all(sourceId, sessionId) as { tableName: RowTable, json: string }[];
   const of = <T>(table: RowTable) => rows.filter((row) => row.tableName === table).map((row) => JSON.parse(row.json) as T);

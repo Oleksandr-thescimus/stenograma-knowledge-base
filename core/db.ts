@@ -94,6 +94,31 @@ const MIGRATIONS: (string | ((db: Db) => void))[] = [
   // embedded again
   (db) => (db.prepare('select distinct model from embedding_cache').all() as { model: string }[])
     .forEach(({ model }) => rebuildVectorTable(db, model)),
+  // The app's chats (core/chats.ts)
+  `
+  create table chats (
+    id integer primary key,
+    -- The first question, on one line
+    title text not null,
+    created_at integer not null,
+    updated_at integer not null
+  );
+
+  create table chat_turns (
+    id integer primary key,
+    chat_id integer not null references chats(id) on delete cascade,
+    question text not null,
+    -- JSON: what the rewrite made of the question, and the sources given (ids, without the chunks' text)
+    request text,
+    sources text,
+    answer text not null default '',
+    -- running, done, error
+    state text not null,
+    error text,
+    created_at integer not null
+  );
+  create index chat_turns_chat on chat_turns(chat_id);
+  `,
 ];
 
 // sqlite-vec's path points inside app.asar in a packaged app, which SQLite's dlopen can't read (M0)

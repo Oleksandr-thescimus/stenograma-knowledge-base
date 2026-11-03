@@ -2,14 +2,12 @@ import { generateText, type LanguageModel } from 'ai';
 import { z } from 'zod';
 import type { LlmSettings } from '../settings.ts';
 import { callOptions } from '../llm.ts';
+import type { ChatTurn } from '../protocol.ts';
 
 // F6: before the search, one call turns the question and the conversation into what to search for, the dates and the
 // person. When its JSON can't be read, the question is searched as it is
 
-export interface ChatTurn {
-  role: 'user' | 'assistant';
-  content: string;
-}
+export type { ChatTurn };
 
 export interface SearchRequest {
   query: string;
@@ -78,11 +76,12 @@ export const parseRewrite = (reply: string, question: string): SearchRequest => 
 };
 
 export const rewriteQuestion = async (
-  model: LanguageModel, settings: LlmSettings, question: string, history: ChatTurn[] = [], now = new Date(),
+  model: LanguageModel, settings: LlmSettings, question: string, history: ChatTurn[] = [], now = new Date(), abortSignal?: AbortSignal,
 ): Promise<SearchRequest> => {
   try {
     const { text } = await generateText({
       model,
+      abortSignal,
       system: rewriteSystem(now, Intl.DateTimeFormat().resolvedOptions().timeZone),
       prompt: conversationText(question, history),
       maxOutputTokens: 300,

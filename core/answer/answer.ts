@@ -59,19 +59,21 @@ export interface PreparedAnswer {
   leftOut: number;
 }
 
-// F8: with a cloud LLM, only chunks of sources with cloudAllowed go into the context
-export const prepareAnswer = (db: Db, settings: LlmSettings, question: string, hits: SearchHit[]): PreparedAnswer => {
+// F8: with a cloud LLM, only chunks of sources with cloudAllowed go into the context. A follow-up question ("and when is
+// it?") comes with what the rewrite made of it, complete on its own, as the answer doesn't see the conversation
+export const prepareAnswer = (db: Db, settings: LlmSettings, question: string, hits: SearchHit[], completeQuestion?: string): PreparedAnswer => {
   const cloudAllowed = new Set((db.prepare('select id from sources where cloud_allowed = 1').all() as { id: number }[]).map((row) => row.id));
   const allowed = isLocalLlm(settings) ? hits : hits.filter((hit) => cloudAllowed.has(hit.sourceId));
   const budget = INPUT_TOKEN_BUDGET[settings.provider];
   const sourcesBudget = budget === undefined
     ? undefined
     : budget - estimateTokens(ANSWER_SYSTEM) - estimateTokens(question) - PROMPT_OVERHEAD_TOKENS;
-  const sources = pickSources(allowed, sourcesBudget);
+  const complete = completeQuestion && completeQuestion !== question ? `\nThe question, complete: ${completeQuestion}` : '';
+  const sources = pickSources(allowed, sourcesBudget === undefined ? undefined : sourcesBudget - estimateTokens(complete));
 
   return {
     system: ANSWER_SYSTEM,
-    prompt: `Sources:\n\n${sources.map(formatSource).join('\n\n')}\n\nQuestion: ${question}`,
+    prompt: `Sources:\n\n${sources.map(formatSource).join('\n\n')}\n\nQuestion: ${question}${complete}`,
     sources,
     leftOut: hits.length - allowed.length,
   };
@@ -80,8 +82,11 @@ export const prepareAnswer = (db: Db, settings: LlmSettings, question: string, h
 // The numbers the answer cites, to list those sources first
 export const citedNumbers = (answer: string) => new Set([...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])));
 
-export const streamAnswer = (model: LanguageModel, settings: LlmSettings, prepared: PreparedAnswer, onError: (error: unknown) => void) => streamText({
+export const streamAnswer = (
+  model: LanguageModel, settings: LlmSettings, prepared: PreparedAnswer, onError: (error: unknown) => void, abortSignal?: AbortSignal,
+) => streamText({
   model,
+  abortSignal,
   system: prepared.system,
   prompt: prepared.prompt,
   maxOutputTokens: MAX_ANSWER_TOKENS,

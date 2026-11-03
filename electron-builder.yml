@@ -3,10 +3,19 @@ appId: com.stenograma.kb
 productName: Stenograma KB
 directories:
   output: dist
-# electron-vite's build; package.json is always included, and node_modules holds only the "dependencies"
+# electron-vite's build and the icons it points to (resources/, as electron-vite's ?asset imports expect);
+# package.json is always included, and node_modules holds only the "dependencies"
 files:
   - out/**/*
+  - resources/**/*
+  # better-sqlite3 brings every platform's binary and its C sources (27 MB, M0), and the keyring a musl build: this
+  # Linux x64 app needs only linux-x64.node and the glibc build
+  - "!node_modules/better-sqlite3/{deps,src,build}/**"
+  - "!node_modules/better-sqlite3/binding.gyp"
+  - "!node_modules/better-sqlite3/prebuilds/{darwin-*,win32-*,linux-arm64.node,linuxmusl-*}"
+  - "!node_modules/@napi-rs/keyring-linux-x64-musl/**"
 linux:
+  icon: resources/icon.png
   target:
     - AppImage
     - deb

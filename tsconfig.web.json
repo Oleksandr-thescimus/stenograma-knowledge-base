@@ -14,5 +14,5 @@
     "skipLibCheck": true,
     "paths": { "@/*": ["./app/renderer/src/*"] }
   },
-  "include": ["app/renderer/src/**/*", "app/preload/api.ts"]
+  "include": ["app/renderer/src/**/*", "app/preload/api.ts", "core/protocol.ts", "core/format.ts"]
 }

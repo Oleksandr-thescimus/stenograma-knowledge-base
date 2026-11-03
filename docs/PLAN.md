@@ -134,6 +134,66 @@ on the release") and draft replies to new emails and messages.
   - Sessions go by signatures instead of a cursor ([Sending](#sending-stenograma-data-from-the-extension), step 3).
   - **Still to do by hand:** pair Chrome and Firefox, see a Meet call arrive within 5 minutes, delete one and see the
     other browser's stay, stop `kb serve` and see the popup say so, then the store release of both browsers.
+  - Chrome is paired and its meetings arrive (2026-11-03); Firefox and the store releases remain.
+
+2026-11-03:
+
+- **The renderer's CSP allows inline styles** (`style-src 'self' 'unsafe-inline'`), scripts still only the app's own
+  ([The app](#the-app)).
+  - Radix's scroll lock (Dialog, AlertDialog, Select) and sonner add `<style>` tags. An email's HTML in an
+    `<iframe srcdoc>` (M4) keeps the page's policy, and emails hold their styles in inline attributes.
+  - A nonce per page load would need the renderer served by a protocol of the app's own, and toasts of its own instead
+    of sonner, and M4 would still need another way for emails. Dropping the components with a scroll lock would cost
+    focus trapping and fighting shadcn/ui.
+  - The risk is a style injected through an HTML injection bug: it could change how the page looks, but not run code, and
+    with nothing loaded from elsewhere (`default-src 'self'`) not send anything out.
+- **M3, the app** (kb eval: recall@10 0.84, MRR 0.59, as after M1).
+  - The core runs in a `utilityProcess` as `core/service.ts`: the lock, the database, the API for the extension, the
+    embedding queue, answers and settings. `core/protocol.ts` holds the methods and events, types only, so the renderer
+    reads it too. The main process checks every call of the renderer with zod (`app/main/ipc.ts`) and passes it on over
+    the `MessagePort`; answers come back in parts, as events.
+  - When the core exits, it's started again after 1, 2, 4... up to 60 s, from 1 s again after a minute's run. The window
+    shows why it stopped (a lock taken by `kb serve`, an exit code) and "Start now".
+  - The core's process is built from its `?modulePath` import, a bundle of its own: as a second entry of the main build,
+    the code both used went into the core's bundle, which the main process then loaded, running the core inside it.
+  - Closing the window hides it; the tray's Quit stops the core, which closes the API and the database and releases the
+    lock. The autostart file is on by default, written only by a packaged app (the dev build's executable is Electron),
+    starts the app with `--hidden`, and is marked as the app's, so turning it off never removes another file.
+  - The settings file stays the store of the settings, written by the core alone; the settings page goes through it.
+    Keys are read from the keyring only when the settings page asks (N1).
+  - A new embedding model is `embeddingRebuild` in the settings until it has every chunk: from the cache where it has the
+    text, else in the queue, which the chunks pushed meanwhile join before each run. Then it becomes `embedding`, and the
+    search switches. The old model's vectors and cache stay, so going back costs no embedding.
+  - Gemini's embeddings take the Gemini key of the LLM, in `kb` too (before, `kb` passed none).
+  - An embedding run stops at the first failed batch and the queue is tried again a minute later, so the status says
+    "Ollama isn't running" at once instead of after ~30 s of retries.
+  - The chats are kept with the knowledge base (`chats`, `chat_turns`) and listed in the sidebar, to open, go on with
+    or delete; "New chat" only starts another. A turn keeps the question, what the rewrite made of it, the sources'
+    ids and the answer, saved as its parts come; one the app stopped in the middle of says so. A cited chunk's text
+    isn't kept: it's read again while its document is there, and a citation of a meeting removed since (in its browser,
+    or with its source) shows as removed while the answer stays. At first the chat lived in the page only, which "New
+    chat" and a restart lost.
+  - The rewrite sees the chat's last three exchanges, read by the core; filters set by hand win over its dates and
+    person but it still runs, so a follow-up question is completed; the answer gets the completed question besides the
+    one asked.
+  - A cited meeting opens in the app from its own copy, at the cited messages (found by the chunk's first line, else by
+    its start), with "Open in Stenograma" for a browser's meetings.
+  - "Sync now" per source comes with the connectors (M4): a browser pushes on its own, and its popup has "Sync now".
+  - The package leaves out other platforms' binaries of better-sqlite3 and the keyring and better-sqlite3's sources: an
+    AppImage of 129 MB and a `.deb` of 104 MB. The icons are the extension's (168 px, scaled up to 512).
+  - Checked on a made-up knowledge base, the built app and the packaged one: an answer from Ollama with citations, the
+    meeting view at the cited moment, "Add a browser" with a token the API takes, the Select without CSP violations, the
+    core killed and back within a second, the window closed with the API still answering, and Quit releasing the lock.
+  - **Still to do by hand:** after a reboot the app starts in the tray, waits for the keyring and then syncs; "Open in
+    Stenograma" opens the history page at the moment. With the app installed, `kb serve` and `kb import` can't run next
+    to it (the lock): pushes go to the app.
+- **The roadmap after M3**, from a brainstorm of the app's features.
+  - [M3.5](#m35-the-app-day-to-day) comes before M4: it improves the app as it's used now, with meetings only.
+  - Later: a quick-ask window on a global shortcut, a weekly digest, and a brief before a meeting (after M4, with
+    Outlook's calendar).
+  - Not taken for now: "forget this meeting" in the knowledge base only (a list of exclusions checked on every push),
+    checking and pulling Ollama's models from the settings, and encrypting the database (SQLCipher with sqlite-vec,
+    little gain on an encrypted disk).
 
 ## Why Electron, with a core of its own
 
@@ -182,11 +242,11 @@ Alternatives considered:
     - The extension's `components/MarkdownText.tsx` (raw HTML shown as text) is ported to Tailwind's typography
       plugin (`prose`).
   - `contextIsolation` and `sandbox` on, no `nodeIntegration`; the preload exposes a short list of IPC calls.
-  - A CSP of `'self'`, for styles too; `setWindowOpenHandler` denies new windows and `will-navigate` is blocked.
+  - A CSP of `'self'`, with inline styles allowed; `setWindowOpenHandler` denies new windows and `will-navigate` is
+    blocked.
     - Radix's scroll lock (Dialog, Select, DropdownMenu, through `react-remove-scroll`) and sonner's toasts add
-      `<style>` tags, which that CSP blocks.
-    - With the first of them, styles get a nonce (`react-style-singleton` reads it with `get-nonce`) or
-      `'unsafe-inline'`.
+      `<style>` tags, which that CSP blocked. So styles may be inline, scripts not
+      ([Decisions](#decisions), 2026-11-03).
 - **Untrusted content.** Emails and messages are written by other people.
   - They're shown as the text that was indexed, or as HTML in an `<iframe sandbox>` without scripts and with remote
     images blocked (tracking pixels).
@@ -376,6 +436,8 @@ without approval, a people directory that joins one person's names across source
     (the signs), and `sourceKind` and `createdAt` are its metadata columns.
   - `embedding_cache`: model, textHash, vector (float32). Also where the search rescores its candidates from.
   - `jobs`: the embedding queue, with retries.
+  - `chats` and `chat_turns`: the app's chats; a turn's question, request, cited sources (ids, without the chunks'
+    text), answer and state.
   - `drafts`: source, conversation, the message replied to, text, the chunks used, status (`pending`, `sent`,
     `dismissed`), createdAt; and `sent_log`.
 - **Embeddings.** One provider interface with three implementations:
@@ -538,17 +600,18 @@ for one person, not counting the wait for a store review.
 | M1 | Meetings in the terminal | `kb ask` answers about meetings imported from a backup, with citations | 5–7 days |
 | M2 | Meetings arrive by themselves | The extension pushes changes and deletions within 5 minutes (an extension release) | 4–6 days |
 | M3 | The desktop app | Chat, sources and status in the app, which starts at login and stays in the tray | 5–7 days |
+| M3.5 | The app, day to day | The meetings and their action items browsed without the LLM, the problems it sees told, answers rated into the golden set, a theme | 5–7 days |
 | M4 | Microsoft 365 | Outlook mail and Teams chats are searched with the meetings | 4–5 days |
 | M5 | Gmail | Gmail too | 2–3 days |
 | M6 | Messengers | Telegram, Rocket.Chat and Slack too | 5–8 days |
 | M7 | Reply drafts | Drafts for new emails and messages within a minute, reviewed in the app and copied into the source by hand | 5–7 days |
 | M8 | Sending replies | An approved draft is sent from the app, in the same thread | 3–5 days |
-| Later | Improvements | Reranker, "ask the knowledge base" in the Meet panel, Zoom | as needed |
+| Later | Improvements | Reranker, quick ask, weekly digest, a brief before a meeting, "ask the knowledge base" in the Meet panel, Zoom | as needed |
 
-- M0 → M1 → M2 → M3 in this order. M4–M6 can go in any order after M3. Microsoft goes first: one sign-in covers
+- M0 → M1 → M2 → M3 → M3.5 in this order. M4–M6 can go in any order after M3.5. Microsoft goes first: one sign-in covers
   two sources, and it brings both the email and the chat chunker. M7 and M8 use the sources connected by then.
 - Every change to the extension is in M2, so there's one store release, and its review runs while M3 is built.
-- Meetings alone (M0–M3) take 16–23 days; all of it takes 35–51.
+- Meetings alone (M0–M3.5) take 21–30 days; all of it takes 40–58.
 
 **Done, for every milestone:**
 
@@ -663,7 +726,7 @@ The app takes over from the terminal.
   - the embedding model, rebuilt in the background when changed (F7);
   - the LLM provider, model and keys.
 - **Renderer security** as in [The app](#the-app).
-- **Packaging:** an AppImage and a `.deb` with electron-builder (`install-app-deps` for better-sqlite3).
+- **Packaging:** an AppImage and a `.deb` with electron-builder, without other platforms' native binaries.
 
 Exit, by hand:
 
@@ -671,6 +734,39 @@ Exit, by hand:
 - closing the window keeps it syncing;
 - killing the core's process brings it back;
 - "Open in Stenograma" opens the history page at the moment.
+
+### M3.5. The app, day to day
+
+What makes the app worth opening every day while it has meetings only, and what tells when it stops getting them.
+
+- **The rewrite's filters, undone in one click.** "Searched for" shows the dates and the person taken from the question
+  as chips with a ✕. Removing one asks again without it. A small local model can make up a date range for a question
+  without one, and the meetings it hides can't be seen (M3, `qwen3.5:4b`).
+- **Problems told, not found out from a missing citation.** A notification and the tray's icon when:
+  - a paired browser has sent nothing for some hours of a working day;
+  - Ollama doesn't answer;
+  - the embedding queue makes no progress;
+  - the extension's port is taken.
+- **Meetings.** A page with every meeting, the latest first, searched by its words (FTS, no LLM), each opening in the
+  meeting view. It shows that a meeting arrived, and finds one while the LLM is down or an answer is in doubt.
+- **Action items.** The action items of all meetings in one list (the extension's AI output, `meeting-actions`),
+  filtered by person (with "mine"), period and overdue, each opening its meeting. Read only: whether one is done is
+  the extension's, and changing it here would split the two.
+- **Answers rated.** 👍 or 👎 on an answer; "Add to the golden set" keeps the question with the sources it should find
+  in `eval/golden-set.json` in the data directory, never in the repo (N6). It grows the golden set from real questions,
+  which M0 left to do.
+- **Ask again, copy.** "Ask again with…" another configured model, as when Ollama is down or the answer is weak.
+  "Copy" gives the answer with the meetings' titles and dates in place of `[n]`, to paste into a chat or an email.
+- **Chats:** search and rename; shortcuts (Ctrl+N a new chat, Ctrl+K search, Esc stops an answer).
+- **Theme:** system, dark (Meet's, the default) or light (the extension's light palette), in the settings. It's applied
+  before the window shows, the window's background too, so there's no flash of the other one.
+
+Exit:
+
+- the tests: the problems the notifications watch, the meetings' and action items' lists with their filters, the
+  golden set written in the data directory with mode 0600;
+- by hand: a made-up date range removed with its chip finds the hidden meeting; Ollama stopped gives a notification;
+  the theme follows the system and switches without a restart.
 
 ### M4–M6. Sources
 
@@ -729,6 +825,12 @@ Exit:
 ### Later
 
 - A reranker.
+- **Quick ask:** a small window on a global shortcut (Ctrl+Shift+Space) with a question field, from anywhere. Electron's
+  global shortcuts work on X11 but not on Wayland.
+- **A weekly digest:** on Friday, the decisions of the week, my action items and the overdue ones, as a notification
+  opening a chat. Made by the LLM, so F8 applies.
+- **A brief before a meeting** (after M4): 10 minutes before a calendar event, what was last discussed with its people.
+  Needs Outlook's calendar, a scope (`Calendars.Read`) the M4 sign-in doesn't ask for.
 - "Ask the knowledge base" in the Meet panel (`POST /search`), with an extension release.
 - [Zoom recordings](#later-zoom-recordings); the rest of [Not in v1](#not-in-v1).
 

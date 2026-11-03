@@ -20,5 +20,5 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true
   },
-  "include": ["*.config.ts", "*.config.mts", "app/main/**/*", "app/preload/**/*", "core/**/*", "tests/**/*"]
+  "include": ["*.config.ts", "*.config.mts", "app/main/**/*", "app/core-host/**/*", "app/preload/**/*", "core/**/*", "tests/**/*"]
 }

@@ -19,7 +19,8 @@ const BODY_LIMIT = 8 * 1024 * 1024;
 export interface ServerOptions {
   db: Db;
   port: number;
-  embedModel: string | null;
+  // The model new chunks are queued for; it changes when a rebuilt model takes over (F7)
+  embedModel: () => string | null;
   // After a push or a reconcile, e.g. to embed the new chunks
   onChange?: () => void;
   // Ids and counts only
@@ -80,7 +81,7 @@ export const buildServer = ({ db, port, embedModel, onChange, log = () => undefi
     const browser = token ? findBrowserByToken(db, token) : undefined;
 
     if (!browser) {
-      return refuse(reply, 401, 'Unknown token: pair this browser with yarn kb add-browser');
+      return refuse(reply, 401, 'Unknown token: add this browser in the app\'s Sources (or with yarn kb add-browser)');
     }
 
     request.browser = browser;
@@ -108,7 +109,7 @@ export const buildServer = ({ db, port, embedModel, onChange, log = () => undefi
     }
 
     const sourceId = request.browser!.id;
-    ingestBundles(db, sourceId, request.body.bundles, embedModel);
+    ingestBundles(db, sourceId, request.body.bundles, embedModel());
     markSynced(db, sourceId);
     log(`ingest: source ${sourceId}, ${request.body.bundles.length} sessions`);
     onChange?.();

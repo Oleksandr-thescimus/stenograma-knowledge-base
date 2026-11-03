@@ -1,5 +1,15 @@
 import { join } from 'node:path';
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
+import type { AppEvent, AppStatus, CoreMethods, CoreStatus, ProcessStatus } from '../../core/protocol';
+import windowIconPath from '../../resources/icon.png?asset';
+import trayIconPath from '../../resources/tray.png?asset';
+import coreHostPath from '../core-host/index?modulePath';
+import { HIDDEN_ARG, syncAutostart } from './autostart';
+import { createCoreSupervisor } from './core';
+import { checkCall } from './ipc';
+
+// The app (docs/PLAN.md, M3): one instance, in the tray, starting at login. The core runs in a utilityProcess, so
+// syncing and the extension's pushes go on while the window is closed; only Quit stops them
 
 // Links open in the default browser, and only with these schemes
 const EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
@@ -11,21 +21,107 @@ const openExternally = (url: string) => {
   }
 };
 
-const showWindow = (window: BrowserWindow) => {
-  if (window.isMinimized()) {
-    window.restore();
-  }
+let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let quitting = false;
+let coreStatus: CoreStatus | null = null;
 
-  window.show();
-  window.focus();
+const appStatus = (): AppStatus => ({ process: core.getStatus(), core: coreStatus, canStartAtLogin: app.isPackaged });
+
+const sendToRenderer = (event: AppEvent) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('kb:event', event);
+  }
 };
 
-const createWindow = () => {
+const describeProcess = (status: ProcessStatus) => {
+  switch (status.state) {
+    case 'running':
+      return 'The knowledge base is running';
+    case 'restarting':
+      return 'The knowledge base stopped; starting it again';
+    case 'stopped':
+      return 'The knowledge base is stopped';
+    default:
+      return 'The knowledge base is starting';
+  }
+};
+
+const showWindow = () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow(true);
+
+    return;
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+
+  mainWindow.show();
+  mainWindow.focus();
+};
+
+const updateTray = (status: ProcessStatus) => {
+  if (!tray) {
+    return;
+  }
+
+  tray.setToolTip(`Stenograma KB: ${describeProcess(status).toLowerCase()}`);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Open Stenograma KB', click: showWindow },
+    { type: 'separator' },
+    { label: describeProcess(status), enabled: false },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() },
+  ]));
+};
+
+const core = createCoreSupervisor({
+  entry: coreHostPath,
+  onEvent: (event) => {
+    if (event.type === 'status') {
+      coreStatus = event.status;
+      sendToRenderer({ type: 'status', status: appStatus() });
+    } else {
+      sendToRenderer(event);
+    }
+  },
+  onProcessStatus: (status) => {
+    // Once per exit: the update that schedules the restart
+    if (status.error && status.retryAt) {
+      console.error(`core: ${status.error}; starting it again in ${Math.round((status.retryAt - Date.now()) / 1000)} s`);
+    }
+
+    // The settings are the core's: the main process imports nothing of it, as the core's process is a bundle of its own
+    if (status.state === 'running') {
+      core.invoke('getSettings', {})
+        .then((settings) => applyStartAtLogin(settings.app.startAtLogin))
+        .catch((error: unknown) => console.error(`Autostart: ${(error as Error).message}`));
+    }
+
+    updateTray(status);
+    sendToRenderer({ type: 'status', status: appStatus() });
+  },
+});
+
+// Only a packaged app starts at login: the dev build's executable is Electron's own
+const applyStartAtLogin = (enabled: boolean) => {
+  if (app.isPackaged) {
+    syncAutostart(enabled, process.env.APPIMAGE ?? process.execPath);
+  }
+};
+
+function createWindow(show: boolean) {
   const window = new BrowserWindow({
     width: 1100,
     height: 760,
+    minWidth: 720,
+    minHeight: 480,
     show: false,
     autoHideMenuBar: true,
+    icon: windowIconPath,
+    backgroundColor: '#202124',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       // The renderer will show emails and messages written by other people, so it gets no Node access
@@ -34,8 +130,19 @@ const createWindow = () => {
       nodeIntegration: false,
     },
   });
+  mainWindow = window;
 
-  window.once('ready-to-show', () => window.show());
+  if (show) {
+    window.once('ready-to-show', () => window.show());
+  }
+
+  // Closing the window keeps the app in the tray, syncing; Quit in the tray's menu stops it
+  window.on('close', (event) => {
+    if (!quitting) {
+      event.preventDefault();
+      window.hide();
+    }
+  });
 
   // No new windows: a link that asks for one opens in the browser
   window.webContents.setWindowOpenHandler(({ url }) => {
@@ -60,20 +167,64 @@ const createWindow = () => {
   } else {
     window.loadFile(join(__dirname, '../renderer/index.html'));
   }
-};
+}
+
+// window.kb's calls, checked (app/main/ipc.ts), from the app's own window only
+ipcMain.handle('kb:call', async (event, method: unknown, params: unknown) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    throw new Error('Not allowed');
+  }
+
+  const call = checkCall(method, params);
+
+  switch (call.method) {
+    case 'status':
+      return appStatus();
+    case 'restartCore':
+      core.restartNow();
+
+      return null;
+    case 'openInStenograma':
+      openExternally(await core.invoke('stenogramaLink', call.params));
+
+      return null;
+    case 'saveSettings': {
+      const saved = await core.invoke('saveSettings', call.params);
+      applyStartAtLogin(saved.app.startAtLogin);
+
+      return saved;
+    }
+    default:
+      return core.invoke(call.method as keyof CoreMethods, call.params as never);
+  }
+});
 
 // One instance: starting the app again shows the running one's window
 if (app.requestSingleInstanceLock()) {
-  app.on('second-instance', () => {
-    const [window] = BrowserWindow.getAllWindows();
+  app.on('second-instance', showWindow);
 
-    if (window) {
-      showWindow(window);
+  // The window only hides, so this comes only when it's gone some other way: the app stays in the tray
+  app.on('window-all-closed', () => undefined);
+
+  // The core closes the API and the database and releases the lock before the app exits
+  app.on('before-quit', (event) => {
+    if (quitting) {
+      return;
     }
+
+    quitting = true;
+    event.preventDefault();
+    core.stop().finally(() => app.quit());
   });
 
-  app.on('window-all-closed', () => app.quit());
-  app.whenReady().then(createWindow);
+  app.whenReady().then(() => {
+    tray = new Tray(nativeImage.createFromPath(trayIconPath));
+    tray.on('click', showWindow);
+    updateTray(core.getStatus());
+
+    core.start();
+    createWindow(!process.argv.includes(HIDDEN_ARG));
+  });
 } else {
   app.quit();
 }

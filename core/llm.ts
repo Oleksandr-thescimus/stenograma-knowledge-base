@@ -2,7 +2,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createGroq } from '@ai-sdk/groq';
 import type { LanguageModel } from 'ai';
 import { createOllama } from 'ollama-ai-provider-v2';
-import { isLoopback } from './embed/provider.ts';
+import { createEmbeddingProvider, isLoopback, type EmbeddingSettings } from './embed/provider.ts';
 import { getSecret } from './secrets.ts';
 import type { LlmSettings } from './settings.ts';
 
@@ -17,7 +17,7 @@ const requireKey = (provider: string) => {
   const key = getSecret(llmKeyName(provider));
 
   if (!key) {
-    throw new Error(`No ${provider} key: yarn kb key set ${provider}`);
+    throw new Error(`No ${provider} key: add it in the app's settings, or with yarn kb key set ${provider}`);
   }
 
   return key;
@@ -40,3 +40,8 @@ export const callOptions = (settings: LlmSettings) => ({
   maxRetries: settings.provider === 'groq' ? 6 : 2,
   ...(settings.provider === 'ollama' && { providerOptions: { ollama: { think: false } } }),
 });
+
+// Gemini's embeddings take the Gemini key of the LLM
+export const createConfiguredEmbeddingProvider = (settings: EmbeddingSettings) => createEmbeddingProvider(
+  settings, settings.provider === 'gemini' ? requireKey('gemini') : undefined,
+);

@@ -1,6 +1,8 @@
 @import 'tailwindcss';
 /* The enter and exit animations of shadcn/ui components */
 @import 'tw-animate-css';
+/* prose: AI answers in Markdown (components/MarkdownText.tsx) */
+@plugin '@tailwindcss/typography';
 
 /* Dark mode follows the .dark class on <html>, as shadcn/ui expects */
 @custom-variant dark (&:is(.dark *));

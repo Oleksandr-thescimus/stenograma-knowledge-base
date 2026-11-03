@@ -23,7 +23,7 @@ describe('the API for the extension (N2)', () => {
     ({ db, cleanup } = createTestDb());
     const paired = [createBrowserSource(db, 'Chrome'), createBrowserSource(db, 'Firefox')];
     [chrome, firefox] = paired.map(({ source, token }) => ({ id: source.id, token }));
-    server = buildServer({ db, port: PORT, embedModel: null });
+    server = buildServer({ db, port: PORT, embedModel: () => null });
   });
 
   afterEach(async () => {

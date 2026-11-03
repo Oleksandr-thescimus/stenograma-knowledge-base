@@ -27,6 +27,8 @@ export const vectorTables = (db: Db) => (db.prepare(
 
 // Source kinds such as stenograma-backup and stenograma-browser filter as one: stenograma
 export const sourceFamily = (kind: string) => kind.split('-')[0];
+// The same in SQL, of sources s
+const familyOf = 'case when instr(s.kind, \'-\') > 0 then substr(s.kind, 1, instr(s.kind, \'-\') - 1) else s.kind end';
 
 export const toBlob = (vector: Float32Array) => Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
 export const fromBlob = (blob: Buffer) => new Float32Array(blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength));
@@ -57,7 +59,7 @@ export const queueEmbedding = (db: Db, model: string | null, chunk: { id: number
   }
 };
 
-export const pendingEmbeddings = (db: Db, provider: EmbeddingProvider) => (db.prepare(`
+export const pendingEmbeddings = (db: Db, provider: Pick<EmbeddingProvider, 'id' | 'local'>) => (db.prepare(`
   select count(*) as n from jobs j
   join chunks c on c.id = j.chunk_id join documents d on d.id = c.document_id join sources s on s.id = d.source_id
   where j.model = ? and (? or s.cloud_allowed = 1)
@@ -151,9 +153,38 @@ export const rebuildVectorTable = (db: Db, model: string) => {
   ensureVectorTable(db, model, sample.dimensions);
   db.prepare(`
     insert into ${vectorTableName(model)} (chunk_id, embedding, source_kind, created_at)
-    select c.id, vec_quantize_binary(e.vector),
-      case when instr(s.kind, '-') > 0 then substr(s.kind, 1, instr(s.kind, '-') - 1) else s.kind end, d.created_at
+    select c.id, vec_quantize_binary(e.vector), ${familyOf}, d.created_at
     from chunks c join documents d on d.id = c.document_id join sources s on s.id = d.source_id
     join embedding_cache e on e.model = ? and e.text_hash = c.text_hash
   `).run(model);
 };
+
+// Gives every chunk a vector of the model, or a job for it: from the cache where its text was embedded before, else in
+// the queue. For a model being built after a change (F7), also run again for the chunks that came meanwhile
+export const queueModel = (db: Db, model: string) => db.transaction(() => {
+  const sample = db.prepare('select length(vector) / 4 as dimensions from embedding_cache where model = ? limit 1').get(model) as
+    { dimensions: number } | undefined;
+
+  if (sample) {
+    ensureVectorTable(db, model, sample.dimensions);
+  }
+
+  const table = vectorTableName(model);
+  const missing = hasVectorTable(db, model) ? `c.id not in (select chunk_id from ${table})` : '1';
+
+  if (sample) {
+    db.prepare(`
+      insert into ${table} (chunk_id, embedding, source_kind, created_at)
+      select c.id, vec_quantize_binary(e.vector), ${familyOf}, d.created_at
+      from chunks c join documents d on d.id = c.document_id join sources s on s.id = d.source_id
+      join embedding_cache e on e.model = ? and e.text_hash = c.text_hash
+      where ${missing}
+    `).run(model);
+  }
+
+  db.prepare(`insert or ignore into jobs (chunk_id, model) select c.id, ? from chunks c where ${missing}`).run(model);
+})();
+
+// Drops the queue of models no longer used or being built
+export const keepJobsOf = (db: Db, models: string[]) => db
+  .prepare(`delete from jobs where model not in (${models.map(() => '?').join(',')})`).run(...models);

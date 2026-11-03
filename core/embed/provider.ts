@@ -1,6 +1,9 @@
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { embedMany } from 'ai';
 import { createOllama } from 'ollama-ai-provider-v2';
+import type { EmbeddingSettings } from '../protocol.ts';
+
+export type { EmbeddingSettings };
 
 export type EmbeddingKind = 'query' | 'document';
 
@@ -10,12 +13,6 @@ export interface EmbeddingProvider {
   // A local provider embeds every source; a cloud one only the sources with cloudAllowed (F8)
   local: boolean;
   embed: (values: string[], kind: EmbeddingKind, abortSignal?: AbortSignal) => Promise<Float32Array[]>;
-}
-
-export interface EmbeddingSettings {
-  provider: 'ollama' | 'gemini';
-  model: string;
-  ollamaUrl: string;
 }
 
 // Gemini's 3072 dimensions by default take four times the storage (docs/PLAN.md, Architecture)
@@ -29,6 +26,14 @@ const normalize = (vector: number[]) => {
 
   return Float32Array.from(vector, (value) => value / length);
 };
+
+// What a provider's vectors are kept under, and whether it may see every source (F8), without making it: a cloud one
+// needs its key
+export const embeddingModelId = (settings: EmbeddingSettings) => (settings.provider === 'gemini'
+  ? `gemini:${settings.model}:${GEMINI_DIMENSIONS}`
+  : `ollama:${settings.model}`);
+
+export const isLocalEmbedding = (settings: EmbeddingSettings) => settings.provider === 'ollama' && isLoopback(settings.ollamaUrl);
 
 // multilingual-e5 needs to be told what it reads
 const withPrefix = (model: string, kind: EmbeddingKind) => (model.includes('e5')
@@ -44,7 +49,7 @@ export const createEmbeddingProvider = (settings: EmbeddingSettings, apiKey?: st
     const model = createGoogleGenerativeAI({ apiKey }).embeddingModel(settings.model);
 
     return {
-      id: `gemini:${settings.model}:${GEMINI_DIMENSIONS}`,
+      id: embeddingModelId(settings),
       local: false,
       embed: async (values, kind, abortSignal) => (await embedMany({
         model,
@@ -60,8 +65,8 @@ export const createEmbeddingProvider = (settings: EmbeddingSettings, apiKey?: st
   const model = createOllama({ baseURL: `${settings.ollamaUrl.replace(/\/$/, '')}/api` }).embedding(settings.model);
 
   return {
-    id: `ollama:${settings.model}`,
-    local: isLoopback(settings.ollamaUrl),
+    id: embeddingModelId(settings),
+    local: isLocalEmbedding(settings),
     embed: async (values, kind, abortSignal) => (await embedMany({
       model,
       values: values.map(withPrefix(settings.model, kind)),

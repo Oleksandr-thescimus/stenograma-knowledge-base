@@ -8,11 +8,11 @@ import { citedNumbers, prepareAnswer, streamAnswer } from '../answer/answer.ts';
 import { rewriteQuestion, type SearchRequest } from '../answer/rewrite.ts';
 import { BROWSER_KIND, createBrowserSource } from '../browsers.ts';
 import { getKbId, openDb, type Db } from '../db.ts';
-import { createEmbeddingProvider } from '../embed/provider.ts';
+import { embeddingModelId, isLocalEmbedding } from '../embed/provider.ts';
 import { embedPending, pendingEmbeddings } from '../embed/store.ts';
 import { evaluate, readGoldenSet, summarize } from '../eval.ts';
 import { formatDay, formatMoment } from '../format.ts';
-import { createLanguageModel, isLocalLlm, llmKeyName } from '../llm.ts';
+import { createConfiguredEmbeddingProvider, createLanguageModel, isLocalLlm, llmKeyName } from '../llm.ts';
 import { acquireLock } from '../lock.ts';
 import { dataDir, dbPath, ensureDataDir, goldenSetPath, lockPath, settingsPath } from '../paths.ts';
 import { search, type SearchHit } from '../search.ts';
@@ -107,7 +107,7 @@ const readHidden = (prompt: string) => new Promise<string>((resolve) => {
 const progress = (label: string) => (done: number, total: number) => process.stdout.write(`\r${label} ${done}/${total}`);
 
 const embedQueue = async (db: Db) => {
-  const provider = createEmbeddingProvider(loadSettings().embedding);
+  const provider = createConfiguredEmbeddingProvider(loadSettings().embedding);
   const pending = pendingEmbeddings(db, provider);
 
   if (!pending) {
@@ -161,7 +161,7 @@ const commands: Record<string, () => Promise<void>> = {
     const bundles = bundlesFromBackup(readBackup(path));
     const source = findOrCreateOnlySource(db, 'stenograma-backup', basename(path));
     const { embedding } = loadSettings();
-    const model = createEmbeddingProvider(embedding).id;
+    const model = embeddingModelId(embedding);
     ingestBundles(db, source.id, bundles, model);
     const removed = reconcileSessions(db, source.id, bundles.map((bundle) => bundle.session.sessionId));
     markSynced(db, source.id);
@@ -178,7 +178,7 @@ const commands: Record<string, () => Promise<void>> = {
       throw new Error('Usage: yarn kb search <query>');
     }
 
-    const provider = createEmbeddingProvider(loadSettings().embedding);
+    const provider = createConfiguredEmbeddingProvider(loadSettings().embedding);
     const { hits, warning } = await search(db, query, {
       provider,
       limit: values.limit ? Number(values.limit) : 10,
@@ -205,7 +205,7 @@ const commands: Record<string, () => Promise<void>> = {
 
   eval: () => withReadonlyDb(async (db) => {
     const questions = readGoldenSet(values.golden ?? goldenSetPath());
-    const provider = createEmbeddingProvider(loadSettings().embedding);
+    const provider = createConfiguredEmbeddingProvider(loadSettings().embedding);
     const results = await evaluate(db, questions, provider);
     console.log(`${questions.length} questions, embeddings ${provider.id}\n`);
     console.log('group       recall@10  MRR@10  session@10');
@@ -234,7 +234,7 @@ const commands: Record<string, () => Promise<void>> = {
 
     const { query, ...filters } = request;
     const { hits, warning } = await search(db, query, {
-      ...filters, provider: createEmbeddingProvider(settings.embedding), limit: 20, sourceKind: values.source,
+      ...filters, provider: createConfiguredEmbeddingProvider(settings.embedding), limit: 20, sourceKind: values.source,
     });
 
     if (warning) {
@@ -306,7 +306,7 @@ const commands: Record<string, () => Promise<void>> = {
   serve: () => withWritableDb(async (db) => {
     const settings = loadSettings();
     const { port } = settings.server;
-    const provider = createEmbeddingProvider(settings.embedding);
+    const provider = createConfiguredEmbeddingProvider(settings.embedding);
     const controller = new AbortController();
     let running: Promise<void> | null = null;
     let again = false;
@@ -341,7 +341,7 @@ const commands: Record<string, () => Promise<void>> = {
       })();
     };
 
-    const server = buildServer({ db, port, embedModel: provider.id, onChange: embedSoon, log: (line) => console.log(line) });
+    const server = buildServer({ db, port, embedModel: () => provider.id, onChange: embedSoon, log: (line) => console.log(line) });
     await server.listen({ host: '127.0.0.1', port });
     console.log(`The knowledge base listens on http://127.0.0.1:${port} (Ctrl+C stops it)`);
     embedSoon();
@@ -404,7 +404,8 @@ const commands: Record<string, () => Promise<void>> = {
   }),
 
   status: () => withReadonlyDb(async (db) => {
-    const provider = createEmbeddingProvider(loadSettings().embedding);
+    const { embedding } = loadSettings();
+    const provider = { id: embeddingModelId(embedding), local: isLocalEmbedding(embedding) };
     console.log(`Knowledge base ${getKbId(db)} in ${dataDir()}`);
     console.log(`Embeddings: ${provider.id}, ${pendingEmbeddings(db, provider)} chunks in the queue\n`);
 
