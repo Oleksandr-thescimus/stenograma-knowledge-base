@@ -26,7 +26,9 @@ the app or from the terminal; email and chats come next.
 - 🚀 Meetings and their action items browsed in the app without an LLM, and the dates and person taken from a question
   undone in one click
 - 🚀 Notifications when meetings stop arriving or the local AI doesn't answer
+- 🚀 The index's progress: the queue with its speed and time left, per source, and the last runs
 - 🚀 Answers rated into a private golden set, asked again with another model, or copied with their sources
+- 🚀 The tokens each answer used, and the totals of the day and the month per model
 - 🚀 Light and dark themes
 - 🚀 Chats searched and renamed, and keyboard shortcuts
 - ✅ Groq, Gemini or Ollama for answers; local embeddings (Ollama's bge-m3) by default
@@ -34,7 +36,7 @@ the app or from the terminal; email and chats come next.
 - 🚀 Outlook and Teams chats, Gmail, Telegram, Rocket.Chat and Slack
 - 🚀 Reply drafts for new emails and messages within a minute, reviewed in the app and sent only when you approve
 - ✅ Starts at login and keeps syncing from the tray
-- 🚀 All data and the index stay on your machine
+- ✅ All data and the index stay on your machine
 - 💡 A quick-ask window on a global shortcut
 - 💡 A weekly digest of decisions and action items
 - 💡 A brief before a meeting: what was last discussed with its people (with Outlook's calendar)

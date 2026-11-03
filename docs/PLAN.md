@@ -437,7 +437,8 @@ without approval, a people directory that joins one person's names across source
   - `embedding_cache`: model, textHash, vector (float32). Also where the search rescores its candidates from.
   - `jobs`: the embedding queue, with retries.
   - `chats` and `chat_turns`: the app's chats; a turn's question, request, cited sources (ids, without the chunks'
-    text), answer and state.
+    text), answer and state; from M3.5 its tokens.
+  - `llm_usage` (M3.5): tokens in and out per day and model, and the number of calls.
   - `drafts`: source, conversation, the message replied to, text, the chunks used, status (`pending`, `sent`,
     `dismissed`), createdAt; and `sent_log`.
 - **Embeddings.** One provider interface with three implementations:
@@ -600,7 +601,7 @@ for one person, not counting the wait for a store review.
 | M1 | Meetings in the terminal | `kb ask` answers about meetings imported from a backup, with citations | 5–7 days |
 | M2 | Meetings arrive by themselves | The extension pushes changes and deletions within 5 minutes (an extension release) | 4–6 days |
 | M3 | The desktop app | Chat, sources and status in the app, which starts at login and stays in the tray | 5–7 days |
-| M3.5 | The app, day to day | The meetings and their action items browsed without the LLM, the problems it sees told, answers rated into the golden set, a theme | 5–7 days |
+| M3.5 | The app, day to day | The meetings and their action items browsed without the LLM, the problems it sees told, the index's progress, the tokens used, answers rated into the golden set, a theme | 7–9 days |
 | M4 | Microsoft 365 | Outlook mail and Teams chats are searched with the meetings | 4–5 days |
 | M5 | Gmail | Gmail too | 2–3 days |
 | M6 | Messengers | Telegram, Rocket.Chat and Slack too | 5–8 days |
@@ -611,7 +612,7 @@ for one person, not counting the wait for a store review.
 - M0 → M1 → M2 → M3 → M3.5 in this order. M4–M6 can go in any order after M3.5. Microsoft goes first: one sign-in covers
   two sources, and it brings both the email and the chat chunker. M7 and M8 use the sources connected by then.
 - Every change to the extension is in M2, so there's one store release, and its review runs while M3 is built.
-- Meetings alone (M0–M3.5) take 21–30 days; all of it takes 40–58.
+- Meetings alone (M0–M3.5) take 23–32 days; all of it takes 42–60.
 
 **Done, for every milestone:**
 
@@ -747,6 +748,10 @@ What makes the app worth opening every day while it has meetings only, and what 
   - Ollama doesn't answer;
   - the embedding queue makes no progress;
   - the extension's port is taken.
+- **The index's progress.** The Sources page's index card shows, besides the chunks still to embed:
+  - a progress bar for the queue, as for a model's rebuild, with the speed (chunks a minute) and the time left;
+  - what's waiting, per source;
+  - the last runs: when, how many chunks, how long, and the error of a failed one.
 - **Meetings.** A page with every meeting, the latest first, searched by its words (FTS, no LLM), each opening in the
   meeting view. It shows that a meeting arrived, and finds one while the LLM is down or an answer is in doubt.
 - **Action items.** The action items of all meetings in one list (the extension's AI output, `meeting-actions`),
@@ -757,14 +762,20 @@ What makes the app worth opening every day while it has meetings only, and what 
   which M0 left to do.
 - **Ask again, copy.** "Ask again with…" another configured model, as when Ollama is down or the answer is weak.
   "Copy" gives the answer with the meetings' titles and dates in place of `[n]`, to paste into a chat or an email.
+- **Tokens.** Under each answer, the tokens it used, in and out (the rewrite and the answer), kept with the chat. In
+  the settings, the totals of today and of this month per model, in a table of their own (`llm_usage`), so deleting a
+  chat doesn't lower them. Embeddings aren't counted: Gemini's give no count (`usage` is undefined in
+  `@ai-sdk/google`).
 - **Chats:** search and rename; shortcuts (Ctrl+N a new chat, Ctrl+K search, Esc stops an answer).
 - **Theme:** system, dark (Meet's, the default) or light (the extension's light palette), in the settings. It's applied
   before the window shows, the window's background too, so there's no flash of the other one.
 
 Exit:
 
-- the tests: the problems the notifications watch, the meetings' and action items' lists with their filters, the
-  golden set written in the data directory with mode 0600;
+- the tests: the problems the notifications watch, the index's progress (speed, time left, per source) with a fake
+  provider, the tokens of an answer kept with its turn and summed per day and model (also after the chat is deleted),
+  the meetings' and action items' lists with their filters, the golden set written in the data directory with mode
+  0600;
 - by hand: a made-up date range removed with its chip finds the hidden meeting; Ollama stopped gives a notification;
   the theme follows the system and switches without a restart.
 
