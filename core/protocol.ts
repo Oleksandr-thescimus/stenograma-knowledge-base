@@ -169,6 +169,25 @@ export interface MeetingActionItem {
   done: boolean;
 }
 
+// A short summary the app made of a meeting ("Summarize" in its view), kept with it
+export interface ShortSummary {
+  text: string;
+  // provider model, e.g. groq openai/gpt-oss-120b
+  model: string;
+  createdAt: number;
+  // The meeting's text changed since
+  stale: boolean;
+}
+
+// A summary arrives in parts, as events
+export type SummaryPart =
+  // Calls done of all those needed (more than one for a meeting summarized in parts); all may grow
+  | { kind: 'progress', done: number, all: number, llm: string, local: boolean }
+  | { kind: 'text', text: string }
+  | { kind: 'done', summary: ShortSummary }
+  | { kind: 'stopped' }
+  | { kind: 'error', message: string };
+
 // A cited meeting from the knowledge base's own copy (The app: meetings in answers)
 export interface MeetingView {
   sourceId: number;
@@ -178,7 +197,9 @@ export interface MeetingView {
   origin: 'meet' | 'recording';
   participants: string[];
   messages: MeetingMessage[];
+  // The extension's summary, and the app's own short one
   summary: string | null;
+  shortSummary: ShortSummary | null;
   actionItems: MeetingActionItem[];
   // Only a browser's meetings open in the extension
   canOpenInStenograma: boolean;
@@ -196,6 +217,10 @@ export interface CoreMethods {
   chat: { params: { chatId: number }, result: SavedChat | null };
   deleteChat: { params: { chatId: number }, result: null };
   meeting: { params: { sourceId: number, sessionId: string }, result: MeetingView | null };
+  // Starts a short summary of a meeting; its parts come as summary events. A source without cloudAllowed gets it from
+  // Ollama when a cloud LLM is chosen (F8)
+  summarize: { params: { summaryId: string, sourceId: number, sessionId: string }, result: null };
+  cancelSummary: { params: { summaryId: string }, result: null };
   // The token is shown once: the knowledge base keeps only its hash
   addBrowser: { params: { label: string }, result: { sourceId: number, token: string } };
   removeSource: { params: { sourceId: number }, result: null };
@@ -221,11 +246,13 @@ export interface AppMethods extends Omit<CoreMethods, 'status' | 'stenogramaLink
 
 export type CoreEvent =
   | { type: 'status', status: CoreStatus }
-  | { type: 'ask', askId: string, part: AskPart };
+  | { type: 'ask', askId: string, part: AskPart }
+  | { type: 'summary', summaryId: string, part: SummaryPart };
 
 export type AppEvent =
   | { type: 'status', status: AppStatus }
-  | { type: 'ask', askId: string, part: AskPart };
+  | { type: 'ask', askId: string, part: AskPart }
+  | { type: 'summary', summaryId: string, part: SummaryPart };
 
 // Between the main process and the core
 export type CoreRequest =

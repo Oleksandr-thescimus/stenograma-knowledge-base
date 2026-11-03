@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { embeddingModelId } from '../../core/embed/provider.ts';
 import type { AskPart, CoreEvent, Settings } from '../../core/protocol.ts';
 import { createKbService, type KbService } from '../../core/service.ts';
-import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '../../core/settings.ts';
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, type LlmSettings } from '../../core/settings.ts';
 import { createFakeProvider } from './helpers.ts';
 
 // The core as the app runs it (core/service.ts), on a knowledge base in a temporary directory: the extension's contract
@@ -48,13 +48,19 @@ describe('the core service', () => {
   let events: CoreEvent[];
   let fake: ReturnType<typeof createFakeProvider>;
   let model: MockLanguageModelV3;
+  // The LLM settings each model was made with
+  let llms: LlmSettings[];
   const services: KbService[] = [];
 
   const makeService = () => {
     const service = createKbService({
       onEvent: (event) => events.push(event),
       createEmbeddingProvider: (settings) => ({ ...fake.provider, id: embeddingModelId(settings) }),
-      createLanguageModel: () => model,
+      createLanguageModel: (settings) => {
+        llms.push(settings);
+
+        return model;
+      },
       retryEmbeddingMs: 50,
     });
     services.push(service);
@@ -104,6 +110,7 @@ describe('the core service', () => {
     port = await freePort();
     saveSettings({ ...DEFAULT_SETTINGS, server: { port } });
     events = [];
+    llms = [];
     fake = createFakeProvider();
     model = mockModel('{"query": "бюджет", "from": null, "to": null, "person": null}', ['Бюджет ', 'затвердили [1].']);
   });
@@ -244,6 +251,60 @@ describe('the core service', () => {
     expect(turn.answer).toBe('Бюджет затвердили [1].');
     expect(turn.sources!.sources.length).toBeGreaterThan(0);
     expect(turn.sources!.sources.every((source) => source.removed && source.text === '')).toBe(true);
+  });
+
+  // A meeting's summary parts, once it's done
+  const summaryParts = async (service: KbService, summaryId: string, sourceId: number) => {
+    await service.invoke('summarize', { summaryId, sourceId, sessionId: MEETING });
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'summary' && event.summaryId === summaryId
+      && ['done', 'error', 'stopped'].includes(event.part.kind))).toBe(true));
+
+    return events.flatMap((event) => (event.type === 'summary' && event.summaryId === summaryId ? [event.part] : []));
+  };
+
+  it('summarizes a meeting in parts, as events, and keeps the summary with it', async () => {
+    const { service, sourceId } = await startWithMeetings();
+    const parts = await summaryParts(service, 's1', sourceId);
+
+    expect(parts[0]).toEqual({ kind: 'progress', done: 0, all: 1, llm: 'ollama qwen3.5:9b', local: true });
+    expect(parts.filter((part) => part.kind === 'text').map((part) => part.text).join('')).toBe('Бюджет затвердили [1].');
+    expect(parts.at(-1)).toMatchObject({ kind: 'done', summary: { text: 'Бюджет затвердили [1].', model: 'ollama qwen3.5:9b', stale: false } });
+    expect(await service.invoke('meeting', { sourceId, sessionId: MEETING })).toMatchObject({
+      shortSummary: { text: 'Бюджет затвердили [1].', stale: false },
+    });
+  });
+
+  it('summarizes a meeting that may not go to cloud AI with Ollama, when a cloud LLM is chosen (F8)', async () => {
+    const { service, sourceId } = await startWithMeetings();
+    saveSettings({ ...loadSettings(), llm: { ...DEFAULT_SETTINGS.llm, provider: 'groq', model: 'openai/gpt-oss-120b' } });
+
+    await summaryParts(service, 's2', sourceId);
+
+    expect(llms.at(-1)).toMatchObject({ provider: 'groq' });
+
+    await service.invoke('setCloudAllowed', { sourceId, allowed: false });
+    const parts = await summaryParts(service, 's3', sourceId);
+
+    expect(llms.at(-1)).toEqual({ provider: 'ollama', model: 'qwen3.5:9b', ollamaUrl: DEFAULT_SETTINGS.llm.ollamaUrl });
+    expect(parts[0]).toMatchObject({ kind: 'progress', llm: 'ollama qwen3.5:9b', local: true });
+  });
+
+  it('stops a summary when asked, keeping none', async () => {
+    const { service, sourceId } = await startWithMeetings();
+    model = new MockLanguageModelV3({
+      doStream: ({ abortSignal }) => new Promise((_resolve, reject) => {
+        if (abortSignal?.aborted) {
+          reject(new Error('Aborted'));
+        }
+
+        abortSignal?.addEventListener('abort', () => reject(new Error('Aborted')));
+      }),
+    });
+    await service.invoke('summarize', { summaryId: 's4', sourceId, sessionId: MEETING });
+    await service.invoke('cancelSummary', { summaryId: 's4' });
+
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'summary' && event.part.kind === 'stopped')).toBe(true));
+    expect((await service.invoke('meeting', { sourceId, sessionId: MEETING }))!.shortSummary).toBeNull();
   });
 
   it('marks an answer the app stopped in the middle of', async () => {

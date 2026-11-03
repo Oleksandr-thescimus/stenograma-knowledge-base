@@ -45,10 +45,10 @@ Uses yarn (`yarn.lock`).
   - `service.ts`: the core as the app runs it (the lock, the database, the API, the embedding queue with a model's
     rebuild, answers in parts, settings and keys), answering the methods of `protocol.ts`. `protocol.ts` is types only,
     with no imports, so the renderer's project reads it too. `chats.ts`: the saved chats. `stenograma/meeting.ts`: a
-    cited meeting from the kept rows.
+    cited meeting from the kept rows; `summaries.ts` keeps its short summary, made by `answer/summary.ts`.
   - `embed/`: providers (Ollama, Gemini), vector tables (bit vectors, rescored from `embedding_cache`), the cache and
-    the queue. `llm.ts`, `answer/` (rewrite, answers), `secrets.ts` (keyring), `settings.ts`, `lock.ts`, `eval.ts`,
-    `cli/kb.ts`.
+    the queue. `llm.ts`, `answer/` (rewrite, answers, summaries), `secrets.ts` (keyring), `settings.ts`, `lock.ts`,
+    `eval.ts`, `cli/kb.ts`.
   - Node runs these files as they are, stripping the types: `core/package.json` makes them ESM, imports name the
     `.ts` file, type-only imports say `import type`, and there's no enum, namespace or parameter property
     (`erasableSyntaxOnly`).

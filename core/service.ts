@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { prepareAnswer, streamAnswer } from './answer/answer.ts';
 import { rewriteQuestion } from './answer/rewrite.ts';
+import { summarizeTranscript } from './answer/summary.ts';
 import { BROWSER_KIND, createBrowserSource } from './browsers.ts';
 import {
   addTurn, chatExists, chatHistory, createChat, deleteChat, finishTurn, getChat, interruptRunningTurns, listChats,
@@ -13,15 +14,17 @@ import { createConfiguredEmbeddingProvider, createLanguageModel, isLocalLlm, llm
 import { acquireLock } from './lock.ts';
 import { dataDir, dbPath, ensureDataDir, lockPath } from './paths.ts';
 import type {
-  AskPart, ChatTurn, CitedSource, CoreEvent, CoreMethods, CoreStatus, EmbeddingSettings, KeyProvider, SearchFilters,
-  ServerStatus, Settings,
+  AskPart, ChatTurn, CitedSource, CoreEvent, CoreMethods, CoreStatus, EmbeddingSettings, KeyProvider, LlmSettings,
+  SearchFilters, ServerStatus, Settings, SummaryPart,
 } from './protocol.ts';
 import { search, type SearchHit } from './search.ts';
 import { deleteSecret, getSecret, setSecret } from './secrets.ts';
 import { buildServer, stenogramaOpenUrl } from './server.ts';
-import { loadSettings, saveSettings, type StoredSettings } from './settings.ts';
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, type StoredSettings } from './settings.ts';
 import { listSources, removeSource, setCloudAllowed } from './sources.ts';
-import { getIndexedVersion, getMeeting } from './stenograma/meeting.ts';
+import { meetingDocumentId } from './stenograma/ingest.ts';
+import { getIndexedVersion, getMeeting, meetingHeader, meetingLines } from './stenograma/meeting.ts';
+import { saveSummary, textHash } from './summaries.ts';
 
 // The core as the app runs it, in a utilityProcess (docs/PLAN.md, M3): it holds the lock, the database, the API for
 // the extension and the embedding queue, and answers the methods of protocol.ts. No Electron here, so the tests run it.
@@ -72,6 +75,22 @@ const toCited = ({ n, hit }: { n: number, hit: SearchHit }): CitedSource => ({
 
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+// F8: a meeting whose source doesn't allow cloud AI is summarized by Ollama on this computer with its default model,
+// when a cloud LLM is chosen; as drafts will be (F9)
+const summaryLlm = (settings: LlmSettings, cloudAllowed: boolean): LlmSettings => {
+  if (cloudAllowed || isLocalLlm(settings)) {
+    return settings;
+  }
+
+  const local: LlmSettings = { provider: 'ollama', model: DEFAULT_SETTINGS.llm.model, ollamaUrl: settings.ollamaUrl };
+
+  if (!isLocalLlm(local)) {
+    throw new Error('This meeting may not go to cloud AI, and Ollama isn\'t set up on this computer');
+  }
+
+  return local;
+};
+
 export const createKbService = (options: ServiceOptions) => {
   const { onEvent, log = () => undefined, retryEmbeddingMs = 60_000 } = options;
   const makeEmbedder = options.createEmbeddingProvider ?? createConfiguredEmbeddingProvider;
@@ -82,6 +101,7 @@ export const createKbService = (options: ServiceOptions) => {
   let server: ReturnType<typeof buildServer> | null = null;
   let serverStatus: ServerStatus = { port: 0, listening: false, error: null };
   const asks = new Map<string, AbortController>();
+  const summaries = new Map<string, AbortController>();
   let stopping = false;
   const stopController = new AbortController();
 
@@ -367,6 +387,59 @@ export const createKbService = (options: ServiceOptions) => {
     }
   };
 
+  const summarize = async ({ summaryId, sourceId, sessionId }: CoreMethods['summarize']['params']) => {
+    const controller = new AbortController();
+    const send = (part: SummaryPart) => onEvent({ type: 'summary', summaryId, part });
+    let local = false;
+    summaries.set(summaryId, controller);
+
+    try {
+      const current = openedDb();
+      const meeting = getMeeting(current, sourceId, sessionId);
+
+      if (!meeting) {
+        throw new Error('This meeting is no longer in the knowledge base');
+      }
+
+      const lines = meetingLines(meeting);
+
+      if (!lines.length) {
+        throw new Error('This meeting has no text to summarize');
+      }
+
+      const configured = loadSettings().llm;
+      const source = listSources(current).find((candidate) => candidate.id === sourceId);
+      const llm = summaryLlm(configured, source?.cloudAllowed ?? false);
+      const label = `${llm.provider} ${llm.model}`;
+      local = llm !== configured;
+      const text = await summarizeTranscript(makeModel(llm), llm, {
+        header: meetingHeader(meeting),
+        lines,
+        abortSignal: controller.signal,
+        onProgress: (done, all) => send({ kind: 'progress', done, all, llm: label, local: isLocalLlm(llm) }),
+        onText: (part) => send({ kind: 'text', text: part }),
+      });
+
+      // The core may have stopped meanwhile
+      if (!current.open) {
+        return;
+      }
+
+      const summary = saveSummary(current, meetingDocumentId(sourceId, sessionId), textHash(lines), label, text);
+      send({ kind: 'done', summary });
+      log(`summarized a meeting of source ${sourceId}: ${lines.length} lines, ${text.length} characters`);
+    } catch (error) {
+      if (controller.signal.aborted) {
+        send({ kind: 'stopped' });
+      } else {
+        const message = messageOf(error);
+        send({ kind: 'error', message: local ? `This meeting may not go to cloud AI, so Ollama summarizes it: ${message}` : message });
+      }
+    } finally {
+      summaries.delete(summaryId);
+    }
+  };
+
   const getSettings = (): Settings => {
     const { embeddingRebuild, ...settings } = loadSettings();
 
@@ -410,6 +483,19 @@ export const createKbService = (options: ServiceOptions) => {
     },
 
     meeting: ({ sourceId, sessionId }) => getMeeting(openedDb(), sourceId, sessionId),
+
+    summarize: (params) => {
+      // Summarized in parts, as events; the call itself returns at once
+      summarize(params);
+
+      return null;
+    },
+
+    cancelSummary: ({ summaryId }) => {
+      summaries.get(summaryId)?.abort();
+
+      return null;
+    },
 
     addBrowser: ({ label }) => {
       const { source, token } = createBrowserSource(openedDb(), label.trim() || 'Browser');
@@ -530,6 +616,7 @@ export const createKbService = (options: ServiceOptions) => {
       stopping = true;
       stopController.abort();
       asks.forEach((controller) => controller.abort());
+      summaries.forEach((controller) => controller.abort());
 
       if (embedRetry) {
         clearTimeout(embedRetry);

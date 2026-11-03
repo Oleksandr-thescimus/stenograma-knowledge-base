@@ -32,6 +32,8 @@ export const PARAMS: { [M in keyof AppMethods]: z.ZodType<AppMethods[M]['params'
   chat: z.object({ chatId: ID }).strict(),
   deleteChat: z.object({ chatId: ID }).strict(),
   meeting: MEETING,
+  summarize: MEETING.extend({ summaryId: z.string().min(1).max(100) }).strict(),
+  cancelSummary: z.object({ summaryId: z.string().min(1).max(100) }).strict(),
   addBrowser: z.object({ label: z.string().max(100) }).strict(),
   removeSource: z.object({ sourceId: ID }).strict(),
   setCloudAllowed: z.object({ sourceId: ID, allowed: z.boolean() }).strict(),

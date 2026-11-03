@@ -119,6 +119,17 @@ const MIGRATIONS: (string | ((db: Db) => void))[] = [
   );
   create index chat_turns_chat on chat_turns(chat_id);
   `,
+  // Short summaries the app made ("Summarize" in the meeting view), going with their document
+  `
+  create table summaries (
+    document_id text primary key references documents(id) on delete cascade,
+    -- sha256 of the text summarized, to tell when it changed
+    text_hash text not null,
+    model text not null,
+    text text not null,
+    created_at integer not null
+  );
+  `,
 ];
 
 // sqlite-vec's path points inside app.asar in a packaged app, which SQLite's dlopen can't read (M0)

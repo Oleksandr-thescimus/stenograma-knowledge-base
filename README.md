@@ -22,6 +22,7 @@ the app or from the terminal; email and chats come next.
 - ✅ Hybrid search (full text + vectors) in Ukrainian and English, filtered by source, date and person (`yarn kb search`)
 - ✅ Streamed answers with citations in the terminal (`yarn kb ask`)
 - ✅ Citations that open the meeting at the cited moment, in the app or in the extension
+- ✅ A short summary of a cited meeting on demand, kept with it; long meetings summarized in parts
 - 🚀 Citations that open an email or a message
 - 🚀 Meetings and their action items browsed in the app without an LLM, and the dates and person taken from a question
   undone in one click

@@ -194,6 +194,21 @@ on the release") and draft replies to new emails and messages.
   - Not taken for now: "forget this meeting" in the knowledge base only (a list of exclusions checked on every push),
     checking and pulling Ollama's models from the settings, and encrypting the database (SQLCipher with sqlite-vec,
     little gain on an encrypted disk).
+- **"Summarize" in the meeting view**, built ahead of M3.5: only 10 of the 436 meetings in the knowledge base have the
+  extension's summary, so the view of a cited meeting rarely had one.
+  - A short summary of the whole meeting (5–7 bullet points in its language: topics, decisions, who took on what),
+    streamed. The button is there also when the extension's summary is, as that one is often long.
+  - The summary and its progress are in the view's header, which doesn't scroll: the text below opens at the cited
+    moment. It can be folded to a line, which the window remembers.
+  - Kept with the meeting (`summaries`) and the hash of its text: opened again, it shows at once, marked stale once the
+    text changes, with "Summarize again". It goes with the meeting, and isn't indexed.
+  - A meeting longer than the model's input (Groq's free tier: 4000 tokens; Ollama: an 8192-token context, set for the
+    call, as its default 4096 would cut a part off) is summarized in parts, one call at a time for the per-minute
+    limits, and their notes are combined, again while they don't fit. The view shows the step, and after a minute says
+    that Gemini takes a whole meeting at once. The meetings are ~6k tokens on average, the longest ~95k.
+  - F8: with a cloud LLM chosen, a meeting whose source doesn't allow it is summarized by Ollama on this computer with
+    its default model (`qwen3.5:9b`), as drafts will be; the error says so when Ollama doesn't answer.
+  - Closing the view stops it, and a stopped summary isn't kept.
 
 ## Why Electron, with a core of its own
 
@@ -272,6 +287,7 @@ Alternatives considered:
     without `v` the history page would show another text than the one cited. It opens that version on the Text tab
     (its own text when the version was deleted since) and scrolls to the moment.
   - A meeting pushed by another browser can only be shown in the app.
+  - "Summarize" makes a short summary of the meeting, kept with it ([Decisions](#decisions), 2026-11-03).
 
 ## Requirements
 
@@ -443,6 +459,8 @@ without approval, a people directory that joins one person's names across source
   - `chats` and `chat_turns`: the app's chats; a turn's question, request, cited sources (ids, without the chunks'
     text), answer and state; from M3.5 its tokens.
   - `llm_usage` (M3.5): tokens in and out per day and model, and the number of calls.
+  - `summaries`: the app's short summary of a document (a meeting), with the hash of the text it summarized and the
+    model; it goes with its document.
   - `drafts`: source, conversation, the message replied to, text, the chunks used, status (`pending`, `sent`,
     `dismissed`), createdAt; and `sent_log`.
 - **Embeddings.** One provider interface with three implementations:
