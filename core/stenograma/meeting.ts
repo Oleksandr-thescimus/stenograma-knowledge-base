@@ -2,7 +2,7 @@ import type { Db } from '../db.ts';
 import type { MeetingView } from '../protocol.ts';
 import { BROWSER_KIND } from '../browsers.ts';
 import { readRows } from './ingest.ts';
-import { getParticipants, getSessionDate, getSessionTitle, pickMessages, pickSummary, sortActionItems } from './rules.ts';
+import { getParticipants, getSessionDate, getSessionTitle, pickMessages, pickSummary, pickText, sortActionItems } from './rules.ts';
 
 // A cited meeting from the knowledge base's own copy of its rows, as F1 indexes it: the text it picked, the latest
 // summary and the action items. Moments count from the first message with a time, as the chunks' starts do
@@ -35,4 +35,12 @@ export const getMeeting = (db: Db, sourceId: number, sessionId: string): Meeting
     actionItems: sortActionItems(actionItems).map(({ what, who, due, done }) => ({ what, who, due, done })),
     canOpenInStenograma: source?.kind === BROWSER_KIND,
   };
+};
+
+// The version of a meeting its chunks are made of (its createdAt), null for the session's own text or a meeting that's
+// gone. Chunks are made again whenever the rows change, so this is the text a citation's moment counts in
+export const getIndexedVersion = (db: Db, sourceId: number, sessionId: string) => {
+  const { session, transcripts } = readRows(db, sourceId, sessionId);
+
+  return session ? pickText(session, transcripts).version : null;
 };

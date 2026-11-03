@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getSessionDate, getSessionTitle, pickMessages, pickSummary } from '../../core/stenograma/rules.ts';
+import { getSessionDate, getSessionTitle, pickMessages, pickSummary, pickText } from '../../core/stenograma/rules.ts';
 import type { AssistantAnswer, Session, Transcript } from '../../core/stenograma/types.ts';
 
 const version = (createdAt: number, status: Transcript['status'] = 'done'): Transcript => ({
@@ -28,6 +28,17 @@ describe('F1: what of a session is indexed', () => {
 
     expect(pickMessages(recording, [version(2), version(1)])[0].text).toBe('version 2');
     expect(pickMessages(recording, [version(4, 'failed')])[0].text).toBe('own');
+  });
+
+  it('names the version it took, for links to the meeting, and none for the session\'s own text', () => {
+    const call: Session = { sessionId: 's', stenogramaArray: [{ user: 'Olena', text: 'caption', source: 'caption' }] };
+    const chatOnly: Session = { sessionId: 's', stenogramaArray: [{ user: 'Olena', text: 'chat only', source: 'chat' }] };
+    const recording: Session = { sessionId: 's', origin: 'recording', stenogramaArray: [] };
+
+    expect(pickText(call, [version(1)]).version).toBeNull();
+    expect(pickText(chatOnly, [version(1), version(3)]).version).toBe(3);
+    expect(pickText(recording, [version(2), version(5, 'transcribing')]).version).toBe(2);
+    expect(pickText(recording, []).version).toBeNull();
   });
 
   it('takes only the latest summary of the whole meeting', () => {

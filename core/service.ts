@@ -21,7 +21,7 @@ import { deleteSecret, getSecret, setSecret } from './secrets.ts';
 import { buildServer, stenogramaOpenUrl } from './server.ts';
 import { loadSettings, saveSettings, type StoredSettings } from './settings.ts';
 import { listSources, removeSource, setCloudAllowed } from './sources.ts';
-import { getMeeting } from './stenograma/meeting.ts';
+import { getIndexedVersion, getMeeting } from './stenograma/meeting.ts';
 
 // The core as the app runs it, in a utilityProcess (docs/PLAN.md, M3): it holds the lock, the database, the API for
 // the extension and the embedding queue, and answers the methods of protocol.ts. No Electron here, so the tests run it.
@@ -495,7 +495,8 @@ export const createKbService = (options: ServiceOptions) => {
         throw new Error('Only a browser\'s meetings open in Stenograma');
       }
 
-      return stenogramaOpenUrl(serverStatus.port || loadSettings().server.port, sourceId, sessionId, startMs);
+      return stenogramaOpenUrl(serverStatus.port || loadSettings().server.port, sourceId, sessionId, startMs,
+        getIndexedVersion(openedDb(), sourceId, sessionId));
     },
   };
 

@@ -9,16 +9,24 @@ const latestFirst = <T extends { createdAt: number }>(rows: T[]) => [...rows].so
 
 // One text per session, so a meeting isn't found twice. A Meet call's own text, or its latest done version when it has
 // no captions: a version made from the audio has only "You" / "Others" and no chat, which would lose who said what.
-// A recording's latest done version, else its own text
-export const pickMessages = (session: Session, transcripts: Transcript[]) => {
+// A recording's latest done version, else its own text. With the version picked (its createdAt), null for the session's
+// own text: a link to the meeting names it, so the extension's history page shows the text that was cited
+export const pickText = (session: Session, transcripts: Transcript[]): { messages: StenogramaMessage[], version: number | null } => {
   const [latestDone] = latestFirst(transcripts.filter((transcript) => transcript.status === 'done'));
+  const own = { messages: session.stenogramaArray, version: null };
 
-  if ((session.origin ?? 'meet') === 'meet') {
-    return session.stenogramaArray.some(isCaption) || !latestDone ? session.stenogramaArray : latestDone.messages;
+  if (!latestDone) {
+    return own;
   }
 
-  return latestDone?.messages ?? session.stenogramaArray;
+  if ((session.origin ?? 'meet') === 'meet' && session.stenogramaArray.some(isCaption)) {
+    return own;
+  }
+
+  return { messages: latestDone.messages, version: latestDone.createdAt };
 };
+
+export const pickMessages = (session: Session, transcripts: Transcript[]) => pickText(session, transcripts).messages;
 
 // The latest summary of the whole meeting: not of a selection, not "What did I miss?", not one replaced by Regenerate
 export const pickSummary = (answers: AssistantAnswer[]) => latestFirst(answers.filter((answer) => answer.kind === 'summary'

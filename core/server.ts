@@ -149,9 +149,14 @@ export const buildServer = ({ db, port, embedModel, onChange, log = () => undefi
   return server;
 };
 
-// The link that opens a meeting of a browser source at a moment, through that browser's extension
-export const stenogramaOpenUrl = (port: number, sourceId: number, sessionId: string, startMs?: number | null) => {
+// The link that opens a meeting of a browser source through that browser's extension: in the text that was indexed (v,
+// the version's createdAt; none for the session's own text, see getIndexedVersion) and at a moment in it (t)
+export const stenogramaOpenUrl = (port: number, sourceId: number, sessionId: string, startMs?: number | null, version?: number | null) => {
   const params = new URLSearchParams({ source: String(sourceId), session: sessionId });
+
+  if (version !== null && version !== undefined) {
+    params.set('v', String(version));
+  }
 
   if (startMs !== null && startMs !== undefined) {
     params.set('t', String(startMs));

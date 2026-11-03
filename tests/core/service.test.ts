@@ -156,6 +156,15 @@ describe('the core service', () => {
     expect(link).toBe(`http://127.0.0.1:${port}/stenograma-open?source=${sourceId}&session=${encodeURIComponent(MEETING).replace(/%20/g, '+')}&t=15000`);
   });
 
+  it('links a recording to the version its chunks are made of, so the extension shows that text', async () => {
+    const { service, sourceId } = await startWithMeetings();
+    const [, recording] = FIXTURE.bundles;
+    const link = new URL(await service.invoke('stenogramaLink', { sourceId, sessionId: recording.session.sessionId, startMs: 0 }));
+
+    expect(link.searchParams.get('v')).toBe(String(recording.transcripts[0].createdAt));
+    expect(link.searchParams.get('t')).toBe('0');
+  });
+
   it('answers in parts: the request, the sources, the text', async () => {
     const { service } = await startWithMeetings();
     const { parts } = await askParts(service, 'a1', { question: 'Що з бюджетом?' });

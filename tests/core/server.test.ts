@@ -114,6 +114,8 @@ describe('the API for the extension (N2)', () => {
     const response = await call('GET', url.replace(`http://${HOST}`, ''));
 
     expect(url).toBe(`http://${HOST}/stenograma-open?source=${chrome.id}&session=2026%2F10%2F20+10%3A00%3A00+-%3E+%2Fabc-defg-hij&t=15000`);
+    // The version cited goes before the moment, as the extension reads both
+    expect(stenogramaOpenUrl(PORT, chrome.id, 's', 0, 1792596000000)).toBe(`http://${HOST}/stenograma-open?source=${chrome.id}&session=s&v=1792596000000&t=0`);
     expect(response.statusCode).toBe(200);
     expect(response.headers['content-type']).toContain('text/html');
     expect(response.headers['content-security-policy']).toBe('default-src \'none\'');

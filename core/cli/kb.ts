@@ -22,6 +22,7 @@ import { loadSettings } from '../settings.ts';
 import { findOrCreateOnlySource, listSources, markSynced, removeSource, setCloudAllowed } from '../sources.ts';
 import { bundlesFromBackup, readBackup } from '../stenograma/backup.ts';
 import { ingestBundles, reconcileSessions } from '../stenograma/ingest.ts';
+import { getIndexedVersion } from '../stenograma/meeting.ts';
 
 const USAGE = `Usage: yarn kb <command>
 
@@ -273,7 +274,9 @@ const commands: Record<string, () => Promise<void>> = {
     const { port } = settings.server;
     prepared.sources.filter((source) => cited.has(source.n)).forEach(({ n, hit }) => {
       // A meeting pushed by a browser opens there, at the moment (docs/PLAN.md, The app); an imported one has no browser
-      const link = hit.sourceKind === BROWSER_KIND && hit.threadId ? `\n      ${stenogramaOpenUrl(port, hit.sourceId, hit.threadId, hit.startMs)}` : '';
+      const link = hit.sourceKind === BROWSER_KIND && hit.threadId
+        ? `\n      ${stenogramaOpenUrl(port, hit.sourceId, hit.threadId, hit.startMs, getIndexedVersion(db, hit.sourceId, hit.threadId))}`
+        : '';
       console.log(`  [${n}] ${hitLine(hit)}${link}`);
     });
     console.log([uncited && `  ${uncited} more given but not cited`, leftOut && `  ${leftOut}`].filter(Boolean).join('\n'));

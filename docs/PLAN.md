@@ -262,11 +262,15 @@ Alternatives considered:
 - **Meetings in answers.**
   - The app shows a cited meeting from its own copy, at the cited moment.
   - It can't open `chrome-extension://` or `moz-extension://` pages. So "Open in Stenograma" opens
-    `http://127.0.0.1:<port>/stenograma-open?source=…&session=…&t=…` in the default browser. There a content script of
-    the extension (matching that path; `http://127.0.0.1/*` is already a host permission, so no new install warning)
+    `http://127.0.0.1:<port>/stenograma-open?source=…&session=…&v=…&t=…` in the default browser. There a content script
+    of the extension (matching that path; `http://127.0.0.1/*` is already a host permission, so no new install warning)
     checks that the source is this browser's, asks the background to open the history page at the meeting
     (`openExtensionPage`) and closes the tab.
-  - The history page opens a session from its hash today; it also needs to scroll to the moment.
+  - `v` is the version the meeting's chunks are made of (its `createdAt`; none for the session's own text), from
+    `getIndexedVersion` (`core/stenograma/meeting.ts`), and `t` the moment, counted from that text's first message. A
+    recording is indexed from its latest done version while its own text is often empty (transcription off), so
+    without `v` the history page would show another text than the one cited. It opens that version on the Text tab
+    (its own text when the version was deleted since) and scrolls to the moment.
   - A meeting pushed by another browser can only be shown in the app.
 
 ## Requirements
