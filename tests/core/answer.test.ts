@@ -85,7 +85,7 @@ describe('the answer\'s context', () => {
   afterEach(() => cleanup());
 
   const hit = (n: number, sourceId: number, text = `Текст фрагмента ${n} `.repeat(60)): SearchHit => ({
-    chunkId: n, documentId: `d${n}`, documentKind: 'meeting', sourceId, threadId: `t${n}`, title: `Meeting ${n}`, createdAt: 0,
+    chunkId: n, documentId: `d${n}`, documentKind: 'meeting', sourceId, sourceKind: 'stenograma-backup', threadId: `t${n}`, title: `Meeting ${n}`, createdAt: 0,
     startMs: null, header: `[Meeting · Meeting ${n} · 2026-11-02]`, text, madeByAi: false, participants: [], score: 1 / n,
   });
 

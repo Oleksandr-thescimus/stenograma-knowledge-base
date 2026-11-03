@@ -1,0 +1,86 @@
+{
+  "apiVersion": 1,
+  "bundles": [
+    {
+      "session": {
+        "sessionId": "2026/10/20 10:00:00 -> /abc-defg-hij",
+        "stenogramaArray": [
+          { "user": "Olena Koval", "text": "Доброго ранку, почнемо з бюджету.", "timestamp": 1792486800000, "source": "caption" },
+          { "user": "Andrii Melnyk", "text": "Бюджет на квартал погодили в п'ятницю, закупівлю серверів теж.", "timestamp": 1792486815000, "source": "caption" },
+          { "user": "Olena Koval", "text": "Скину таблицю в чат.", "timestamp": 1792486830000, "source": "chat", "messageId": "spaces/abc/messages/1" }
+        ],
+        "meetTitle": "Weekly planning",
+        "startDate": "2026-10-20T07:00:00.000Z",
+        "endDate": "2026-10-20T07:30:00.000Z",
+        "duration": "30 min",
+        "lastSummary": "Погодили бюджет на квартал і закупівлю серверів.",
+        "assistantVersion": "1.0.0"
+      },
+      "transcripts": [],
+      "assistantAnswers": [
+        {
+          "sessionId": "2026/10/20 10:00:00 -> /abc-defg-hij",
+          "createdAt": 1792488600000,
+          "kind": "summary",
+          "provider": "groq",
+          "model": "openai/gpt-oss-120b",
+          "text": "Погодили бюджет на квартал і закупівлю серверів."
+        },
+        {
+          "sessionId": "2026/10/20 10:00:00 -> /abc-defg-hij",
+          "createdAt": 1792488700000,
+          "kind": "answer",
+          "question": "Хто скине таблицю?",
+          "messageCount": 3,
+          "provider": "groq",
+          "model": "openai/gpt-oss-120b",
+          "text": "Олена скине таблицю в чат."
+        }
+      ],
+      "actionItems": [
+        {
+          "sessionId": "2026/10/20 10:00:00 -> /abc-defg-hij",
+          "createdAt": 1792488600001,
+          "what": "Скинути таблицю бюджету",
+          "who": "Olena Koval",
+          "due": "2026-10-21",
+          "done": false,
+          "updatedAt": 1792488600001
+        }
+      ]
+    },
+    {
+      "session": {
+        "sessionId": "2026/10/21 14:00:00 -> recording",
+        "origin": "recording",
+        "customName": "Call with the vendor",
+        "stenogramaArray": [
+          { "user": "You", "text": "Коли буде поставка?", "timestamp": 1792594800000, "source": "mic" },
+          { "user": "Others", "text": "Наступного тижня", "timestamp": 1792594805000, "source": "system" }
+        ],
+        "startDate": "2026-10-21T11:00:00.000Z",
+        "endDate": "2026-10-21T11:20:00.000Z",
+        "duration": "20 min",
+        "recording": { "engine": "whisper-local", "model": "large-v3-turbo", "language": "uk" }
+      },
+      "transcripts": [
+        {
+          "sessionId": "2026/10/21 14:00:00 -> recording",
+          "createdAt": 1792596000000,
+          "engine": "groq",
+          "model": "whisper-large-v3",
+          "language": "uk",
+          "status": "done",
+          "utterances": 2,
+          "done": 2,
+          "messages": [
+            { "user": "You", "text": "Коли буде поставка серверів?", "timestamp": 1792594800000, "source": "mic" },
+            { "user": "Others", "text": "Поставка наступного тижня, у вівторок.", "timestamp": 1792594805000, "source": "system" }
+          ]
+        }
+      ],
+      "assistantAnswers": [],
+      "actionItems": []
+    }
+  ]
+}

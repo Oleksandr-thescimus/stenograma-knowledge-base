@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { citedNumbers, prepareAnswer, streamAnswer } from '../answer/answer.ts';
 import { rewriteQuestion, type SearchRequest } from '../answer/rewrite.ts';
+import { BROWSER_KIND, createBrowserSource } from '../browsers.ts';
 import { getKbId, openDb, type Db } from '../db.ts';
 import { createEmbeddingProvider } from '../embed/provider.ts';
 import { embedPending, pendingEmbeddings } from '../embed/store.ts';
@@ -15,9 +16,10 @@ import { createLanguageModel, isLocalLlm, llmKeyName } from '../llm.ts';
 import { acquireLock } from '../lock.ts';
 import { dataDir, dbPath, ensureDataDir, goldenSetPath, lockPath, settingsPath } from '../paths.ts';
 import { search, type SearchHit } from '../search.ts';
+import { buildServer, stenogramaOpenUrl } from '../server.ts';
 import { deleteSecret, setSecret } from '../secrets.ts';
 import { loadSettings } from '../settings.ts';
-import { findOrCreateOnlySource, listSources, markSynced, setCloudAllowed } from '../sources.ts';
+import { findOrCreateOnlySource, listSources, markSynced, removeSource, setCloudAllowed } from '../sources.ts';
 import { bundlesFromBackup, readBackup } from '../stenograma/backup.ts';
 import { ingestBundles, reconcileSessions } from '../stenograma/ingest.ts';
 
@@ -32,6 +34,9 @@ const USAGE = `Usage: yarn kb <command>
   key set|delete <groq|gemini>
                        Keep an LLM key in the keyring (typed without echo), or remove it
   eval                 Recall@10 and MRR on the golden set (--golden <path>, default ${goldenSetPath()})
+  serve                The API for the extension on 127.0.0.1 (the port in settings.json), embedding what it pushes
+  add-browser [label]  Pair a browser: makes its source and prints the token to paste into the extension's popup
+  remove <source>      Remove a source with all its documents
   status               Sources, documents and the embedding queue
   cloud <source> on|off
                        Whether a source's content may go to a cloud LLM and cloud embeddings (F8)
@@ -78,6 +83,14 @@ const describeRequest = (request: SearchRequest) => [
   request.to !== undefined && ` · to ${formatDay(request.to - 1)}`,
   request.person && ` · person: ${request.person}`,
 ].filter(Boolean).join('');
+
+const readLine = (prompt: string) => new Promise<string>((resolve) => {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  rl.question(prompt, (answer) => {
+    rl.close();
+    resolve(answer.trim());
+  });
+});
 
 // Reads a line without echoing it, so a key is neither shown nor kept in the shell's history
 const readHidden = (prompt: string) => new Promise<string>((resolve) => {
@@ -257,7 +270,12 @@ const commands: Record<string, () => Promise<void>> = {
     const cited = citedNumbers(answer);
     const uncited = prepared.sources.filter((source) => !cited.has(source.n)).length;
     console.log('\n\nSources:');
-    prepared.sources.filter((source) => cited.has(source.n)).forEach((source) => console.log(`  [${source.n}] ${hitLine(source.hit)}`));
+    const { port } = settings.server;
+    prepared.sources.filter((source) => cited.has(source.n)).forEach(({ n, hit }) => {
+      // A meeting pushed by a browser opens there, at the moment (docs/PLAN.md, The app); an imported one has no browser
+      const link = hit.sourceKind === BROWSER_KIND && hit.threadId ? `\n      ${stenogramaOpenUrl(port, hit.sourceId, hit.threadId, hit.startMs)}` : '';
+      console.log(`  [${n}] ${hitLine(hit)}${link}`);
+    });
     console.log([uncited && `  ${uncited} more given but not cited`, leftOut && `  ${leftOut}`].filter(Boolean).join('\n'));
   }),
 
@@ -284,6 +302,92 @@ const commands: Record<string, () => Promise<void>> = {
     setSecret(llmKeyName(provider), key);
     console.log(`Kept the ${provider} key. To answer with it, set "llm" in ${settingsPath()}`);
   },
+
+  serve: () => withWritableDb(async (db) => {
+    const settings = loadSettings();
+    const { port } = settings.server;
+    const provider = createEmbeddingProvider(settings.embedding);
+    const controller = new AbortController();
+    let running: Promise<void> | null = null;
+    let again = false;
+
+    // One embedding run at a time; a push during it runs it again after
+    const embedSoon = () => {
+      if (running) {
+        again = true;
+
+        return;
+      }
+
+      running = (async () => {
+        do {
+          again = false;
+
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            const done = await embedPending(db, provider, { abortSignal: controller.signal });
+
+            if (done) {
+              console.log(`embedded ${done} chunks with ${provider.id}`);
+            }
+          } catch (error) {
+            if (!controller.signal.aborted) {
+              console.error(`embedding failed: ${(error as Error).message}`);
+            }
+          }
+        } while (again && !controller.signal.aborted);
+
+        running = null;
+      })();
+    };
+
+    const server = buildServer({ db, port, embedModel: provider.id, onChange: embedSoon, log: (line) => console.log(line) });
+    await server.listen({ host: '127.0.0.1', port });
+    console.log(`The knowledge base listens on http://127.0.0.1:${port} (Ctrl+C stops it)`);
+    embedSoon();
+
+    await new Promise((resolve) => {
+      process.once('SIGINT', resolve);
+      process.once('SIGTERM', resolve);
+    });
+    controller.abort();
+    await server.close();
+    await running;
+  }),
+
+  'add-browser': () => withWritableDb(async (db) => {
+    const label = args.join(' ') || 'Browser';
+    const { source, token } = createBrowserSource(db, label);
+    console.log(`Paired "${label}" as source ${source.id}. Paste this token into the extension's popup, under "Local knowledge base":`);
+    console.log(`\n  ${token}\n`);
+    console.log('It\'s shown only now: the knowledge base keeps only its hash.');
+
+    const backup = listSources(db).find((candidate) => candidate.kind === 'stenograma-backup');
+
+    if (backup) {
+      const answer = await readLine(`\nRemove source ${backup.id}, the imported backup (${backup.documents} documents)? Once this browser pushes, each of its meetings would be found twice. [y/N] `);
+
+      if (/^y/i.test(answer)) {
+        removeSource(db, backup.id);
+        console.log(`Removed source ${backup.id}`);
+      }
+    }
+  }),
+
+  remove: () => withWritableDb(async (db) => {
+    const source = listSources(db).find((candidate) => candidate.id === Number(args[0]));
+
+    if (!source) {
+      throw new Error('Usage: yarn kb remove <source id> (yarn kb status lists them)');
+    }
+
+    const answer = await readLine(`Remove source ${source.id} (${source.kind} ${source.account ?? ''}) with its ${source.documents} documents? [y/N] `);
+
+    if (/^y/i.test(answer)) {
+      removeSource(db, source.id);
+      console.log(`Removed source ${source.id}`);
+    }
+  }),
 
   cloud: () => withWritableDb(async (db) => {
     const [id, state] = args;

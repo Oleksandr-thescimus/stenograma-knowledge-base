@@ -13,6 +13,8 @@ export interface LlmSettings {
 export interface Settings {
   embedding: EmbeddingSettings;
   llm: LlmSettings;
+  // The API for the extension, on 127.0.0.1 (N2)
+  server: { port: number };
 }
 
 const OLLAMA_URL = 'http://127.0.0.1:11434';
@@ -21,6 +23,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // M0 picked bge-m3 on Ollama (docs/PLAN.md, Decisions)
   embedding: { provider: 'ollama', model: 'bge-m3', ollamaUrl: OLLAMA_URL },
   llm: { provider: 'ollama', model: 'qwen3.5:9b', ollamaUrl: OLLAMA_URL },
+  server: { port: 47321 },
 };
 
 // Reads the settings, writing the defaults the first time so there's a file to edit
@@ -39,5 +42,6 @@ export const loadSettings = (): Settings => {
   return {
     embedding: { ...DEFAULT_SETTINGS.embedding, ...saved.embedding },
     llm: { ...DEFAULT_SETTINGS.llm, ...saved.llm },
+    server: { ...DEFAULT_SETTINGS.server, ...saved.server },
   };
 };

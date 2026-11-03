@@ -30,6 +30,7 @@ export interface SearchHit {
   documentId: string;
   documentKind: string;
   sourceId: number;
+  sourceKind: string;
   threadId: string | null;
   title: string;
   createdAt: number;
@@ -162,9 +163,11 @@ const loadHits = (db: Db, ids: number[]) => {
   }
 
   const rows = db.prepare(`
-    select c.id as chunkId, d.id as documentId, d.kind as documentKind, d.source_id as sourceId, d.thread_id as threadId,
+    select c.id as chunkId, d.id as documentId, d.kind as documentKind, d.source_id as sourceId, s.kind as sourceKind,
+      d.thread_id as threadId,
       d.title, d.created_at as createdAt, c.start_ms as startMs, c.header, c.text, d.made_by_ai as madeByAi, d.participants
-    from chunks c join documents d on d.id = c.document_id where c.id in (${ids.map(() => '?').join(',')})
+    from chunks c join documents d on d.id = c.document_id join sources s on s.id = d.source_id
+    where c.id in (${ids.map(() => '?').join(',')})
   `).all(...ids) as (Omit<SearchHit, 'madeByAi' | 'participants' | 'score'> & { madeByAi: number, participants: string })[];
 
   return new Map(rows.map((row) => [row.chunkId, { ...row, madeByAi: Boolean(row.madeByAi), participants: JSON.parse(row.participants) as string[] }]));

@@ -8,8 +8,9 @@ Stenograma KB is a personal knowledge base on this machine: meetings from the St
 and messenger chats, searched together, with answers that cite their sources and drafts of replies. An Electron app
 runs it. [docs/PLAN.md](docs/PLAN.md) is the plan: requirements, architecture, milestones and the dated decisions.
 
-M0 (spikes) is done but for the checks that need the user; M1 (meetings in the terminal, `yarn kb`) is under way. The
-app is still a skeleton.
+M0 (spikes) is done but for the checks that need the user; M1 (meetings in the terminal, `yarn kb`) is done. M2 (the
+extension pushes meetings) works with Chrome; Firefox and the extension's store release remain. The app is still a
+skeleton.
 
 The extension is another repo, [stenograma](https://github.com/Oleksandr-thescimus/stenograma), checked out next to
 this one as `../stenograma`. The two meet only at the HTTP API, with no submodule or shared package. Open both with
@@ -26,7 +27,8 @@ Uses yarn (`yarn.lock`).
 - `yarn test`: Vitest under Electron's Node (`ELECTRON_RUN_AS_NODE=1` with the electron binary), the runtime the core
   has in the app.
 - `yarn kb <command>`: the core from the command line, `core/cli/kb.ts` run as TypeScript under Electron's Node
-  (`yarn kb --help`): `import` a backup's `data.json`, `search`, `ask`, `eval` on the golden set, `status`, `key`.
+  (`yarn kb --help`): `import` a backup's `data.json`, `search`, `ask`, `eval` on the golden set, `status`, `key`,
+  `serve` (the API for the extension), `add-browser` (pairs a browser), `remove`, `cloud`.
   It works on the real knowledge base in `~/.local/share/stenograma-kb/`; `STENOGRAMA_KB_DATA` points it elsewhere.
 - `yarn bench [chunks]`: search timings on a throwaway knowledge base of generated chunks (N3: p95 under 300 ms at 100k).
 
@@ -36,6 +38,8 @@ Uses yarn (`yarn.lock`).
   - `db.ts` (schema and migrations), `documents.ts` (documents, chunks, FTS rows, embedding jobs), `sources.ts`.
   - `stenograma/`: the protocol's types (`API_VERSION`), the rules of F1, ingesting bundles, reading a backup.
   - `chunk.ts`, `text/normalize.ts` (FTS normalization, Ukrainian endings, name matching), `search.ts` (hybrid).
+  - `server.ts`: the HTTP API for the extension (Fastify, secured as N2 says); `browsers.ts`: paired browsers and their
+    tokens.
   - `embed/`: providers (Ollama, Gemini), vector tables (bit vectors, rescored from `embedding_cache`), the cache and
     the queue. `llm.ts`, `answer/` (rewrite,
     answers), `secrets.ts` (keyring), `settings.ts`, `lock.ts`, `eval.ts`, `cli/kb.ts`.
@@ -52,6 +56,9 @@ Uses yarn (`yarn.lock`).
     `yarn lint:fix` after it: the registry's code has double quotes and no semicolons. They import `cn` from the `cn`
     package.
 - `tests/`: Vitest. `tests/core/helpers.ts` makes a knowledge base in a temporary file and a fake embedding provider.
+  `tests/fixtures/kb-ingest.json` is the contract with the extension: its test builds a push from fixture rows and
+  compares it with its copy of this file, and `tests/core/server.test.ts` ingests it. A change to the payload changes
+  both copies and raises `API_VERSION` (`core/stenograma/types.ts`).
 
 electron-vite reads the entries from `electron.vite.config.ts`, since they aren't in its default `src/`.
 

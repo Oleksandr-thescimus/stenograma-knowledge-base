@@ -30,7 +30,7 @@ on the release") and draft replies to new emails and messages.
 - **A repository of its own**, `stenograma-knowledge-base`, next to the extension's and not linked to it: no
   submodule, subtree or git dependency. The extension and the app meet only at the HTTP API
   ([Repositories](#repositories)). It was made the same day, ahead of M1, and this plan moved into it.
-- **The core picks what to index.** The extension sends the rows changed since its cursor, and the rules of F1 run in
+- **The core picks what to index.** The extension sends the rows changed since its last push, and the rules of F1 run in
   the core, so changing them needs no extension release.
 - **`cloudAllowed` by default:** on for a browser source (the extension already sends meetings to Groq and Gemini), off
   for email and chats until it's turned on ([F8](#functional)). M0 checks only that a tenant or workspace lets the app
@@ -114,6 +114,26 @@ on the release") and draft replies to new emails and messages.
   - The default LLM in `settings.json` is `qwen3.5:9b` on Ollama, which needs no key; `kb key set` keeps a Groq or
     Gemini key in the keyring. Rewrites and answers on Ollama run without thinking.
   - Not in M1: transformers.js (Ollama is the default), so limiting onnxruntime's threads waits for it.
+- **M2, the knowledge base's side.** `kb serve` (Fastify) on `127.0.0.1:47321` by default (`server.port` in
+  `settings.json`), with `/status`, `/ingest`, `/ingest/reconcile` and `/stenograma-open`; `kb add-browser` and `kb remove`.
+  - A push is `{ apiVersion, bundles }` and a reconcile `{ apiVersion, sessionIds }`; another `apiVersion` gets 409 with
+    the server's. `/status` needs the token too and returns `{ kbId, apiVersion, source: { id, label } }`.
+  - A browser's token is `skb_` and 32 random bytes, shown once by `kb add-browser`; `sources.token_hash` keeps its
+    SHA-256.
+  - Besides http(s) origins, `Origin: null` (a sandboxed page) is refused too. Fastify adds no CORS headers.
+  - `kb serve` embeds what a push brings right after it. `kb ask` prints a `/stenograma-open` link only for meetings of a
+    browser source: an imported one has no browser to open it.
+  - `tests/fixtures/kb-ingest.json` is written here first, from the protocol's types; the extension's test builds the
+    same push from its fixture rows.
+- **M2, the extension's side** (`../stenograma`, on master, not released yet): `changedAt` and its middleware in `db.ts`
+  (`version(8)`), `helpers/knowledgeBase.ts` (bundles, push, reconcile, the `alarms` permission), the popup's folded
+  "Local knowledge base" block, `contents/stenogramaOpen.ts`, and the history page scrolling to a linked moment.
+  - Its `docs/RAG.md` now keeps only its side, with a link here; PRIVACY, PUBLISHING, STORAGE, CLAUDE.md and the next
+    store listing say what's new.
+  - Its tests build `kb-ingest.json` byte for byte from rows that hold everything never to be sent; 812 tests pass.
+  - Sessions go by signatures instead of a cursor ([Sending](#sending-stenograma-data-from-the-extension), step 3).
+  - **Still to do by hand:** pair Chrome and Firefox, see a Meet call arrive within 5 minutes, delete one and see the
+    other browser's stay, stop `kb serve` and see the popup say so, then the store release of both browsers.
 
 ## Why Electron, with a core of its own
 
@@ -327,7 +347,7 @@ without approval, a people directory that joins one person's names across source
 ## Architecture
 
 ```
- Extension ──push (alarms, cursor)──▶ ┐
+ Extension ──push (alarms)─────────▶ ┐
  Gmail API ─────poll historyId──────▶ │  kb core (Electron utilityProcess)
  Graph: mail delta, Teams chats ────▶ ├─▶ normalize → chunk → embedding queue → SQLite
  Telegram (GramJS) ─────────────────▶ │        (FTS5 + sqlite-vec)
@@ -384,7 +404,7 @@ without approval, a people directory that joins one person's names across source
 - **API for the extension.**
   - `POST /ingest`: session bundles (step 1 of [Sending](#sending-stenograma-data-from-the-extension)).
   - `POST /ingest/reconcile`: every session id the browser still has; the rest of its documents is deleted.
-  - `GET /status`, with the knowledge base's id (a new one resets the extension's cursor) and `apiVersion`.
+  - `GET /status`, with the knowledge base's id (a new one makes the extension send everything again) and `apiVersion`.
   - `POST /search`, for a later "ask the knowledge base" in the Meet panel.
   - `GET /stenograma-open` ([The app](#the-app)).
   - `/auth/{microsoft,google}/callback` for loopback OAuth.
@@ -457,17 +477,18 @@ Private Telegram chats have no links to a message, so their citations show the m
      `assistantAnswers` and `actionItems` (also those that `update` and `modify` make), only in the extension's own
      database. `version(8)` indexes it.
    - It's a field of its own. `actionItems.updatedAt` is the time of the user's change, and the archive sync and a
-     restore bring it from Meet or a backup, so it can be older than the cursor and the item would never be sent.
+     restore bring it from Meet or a backup, so it can be older than the last push and the item would never be sent.
    - `getSessionSize` leaves `changedAt` out, like `customName`. Meet's copy never has it, so otherwise every sync
      would send the session again.
-3. **Which sessions go.** On each alarm a session goes when:
-   - `changedAt` of its row, or of one of its transcripts, answers or action items, is after the cursor;
-   - or the keys of its transcripts, answers and action items differ from those last sent. A deleted version or
-     answer leaves no `changedAt`, and only keys are read, which is cheap. The keys sent last are kept in the setting.
-
-   The cursor is the largest `changedAt` sent, minus a minute of overlap, since repeats are cheap (N5). It moves only
-   after the core accepted a batch; batches are up to ~2 MB. With no cursor (the first push, or a knowledge base with
-   another id) the whole tables are read, so rows from before `version(8)` need no stamp.
+3. **Which sessions go.** On each alarm a session goes when its signature differs from the one sent last: the keys of
+   its transcripts, answers and action items, and the latest `changedAt` of it and them, read from the keys and the
+   `changedAt` indexes without the rows.
+   - That covers a change (a later `changedAt`), a deleted version or answer (it leaves no `changedAt`, but other keys)
+     and a new session. Sessions from before `version(8)` have no `changedAt` and go once.
+   - A signature is kept only after the core accepted its batch; batches are up to ~2 MB, the oldest changes first. A
+     knowledge base with another id clears them, so everything goes again.
+   - Planned at first: a cursor (the largest `changedAt` sent, minus a minute of overlap) besides the keys. Its overlap
+     sent the last changed session again on every push, and the signatures make it unneeded (M2).
 4. **Deletions.** On each alarm the extension hashes the list of its session ids. When the hash differs from the last
    one sent, it sends the list to `/ingest/reconcile`. The tombstones can't be used for this: deletions made on Meet
    (`ARCHIVE_DELETE_*`) leave none in the extension's database, transcript versions have none, and a restore removes
@@ -476,8 +497,8 @@ Private Telegram chats have no links to a message, so their citations show the m
    - `helpers/knowledgeBase.ts` in `background.ts` runs on a `chrome.alarms` alarm every 5 minutes (a permission
      without an install warning), and on "Sync now".
    - It sends with `fetch`; `http://127.0.0.1/*` is already in `host_permissions`.
-   - While the app isn't running the request fails: the cursor stays, the status says so, and the next alarm tries
-     again.
+   - While the app isn't running the request fails: nothing is marked as sent, the status says so, and the next alarm
+     tries again.
 6. **One source per browser.**
    - The app's "Add a browser" makes a Stenograma source with its own token, which is pasted into the popup.
    - Chrome and Firefox keep separate histories, and a reconcile from one must not delete the other's meetings.
@@ -492,8 +513,8 @@ Private Telegram chats have no links to a message, so their citations show the m
    - Messages without a `timestamp` give chunks without a start, linked to the meeting.
 8. **Setting.**
    - A folded "Local knowledge base" block in the popup, kept in `chrome.storage.local` under `knowledgeBase` (the
-     token belongs to this machine): URL, token, a switch (off by default), the last push's status, the cursor and the
-     keys sent last.
+     token belongs to this machine): URL, token, a switch (off by default), the last push's status, the knowledge base's
+     id and this browser's source id there, the signatures sent last and the hash of the session list.
    - The backup leaves it out, like every setting. After a restore the next push sends what's missing.
 
 The same change updates the extension's docs:
