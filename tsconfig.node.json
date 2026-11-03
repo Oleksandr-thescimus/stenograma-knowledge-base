@@ -1,6 +1,8 @@
 {
   "compilerOptions": {
     "composite": true,
+    // Nothing is emitted (allowImportingTsExtensions needs that); Vite builds, and Node runs core/ as it is
+    "noEmit": true,
     "target": "ES2024",
     "lib": ["ES2024"],
     "module": "ESNext",
@@ -11,7 +13,12 @@
     "isolatedModules": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    // core/ runs as TypeScript straight in Node (kb), which strips types: imports name their .ts files, type-only
+    // imports say so, and there's no syntax that needs compiling (enums, namespaces, parameter properties)
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true
   },
   "include": ["*.config.ts", "*.config.mts", "app/main/**/*", "app/preload/**/*", "core/**/*", "tests/**/*"]
 }

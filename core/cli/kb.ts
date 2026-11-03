@@ -1,0 +1,325 @@
+// kb: the core from the command line (docs/PLAN.md, M1). Run with `yarn kb <command>`, which starts it under
+// Electron's Node like the app's core. Prints to the terminal what the user asked for; logs nothing else of the content
+import { existsSync } from 'node:fs';
+import { basename } from 'node:path';
+import { createInterface } from 'node:readline';
+import { parseArgs } from 'node:util';
+import { citedNumbers, prepareAnswer, streamAnswer } from '../answer/answer.ts';
+import { rewriteQuestion, type SearchRequest } from '../answer/rewrite.ts';
+import { getKbId, openDb, type Db } from '../db.ts';
+import { createEmbeddingProvider } from '../embed/provider.ts';
+import { embedPending, pendingEmbeddings } from '../embed/store.ts';
+import { evaluate, readGoldenSet, summarize } from '../eval.ts';
+import { formatDay, formatMoment } from '../format.ts';
+import { createLanguageModel, isLocalLlm, llmKeyName } from '../llm.ts';
+import { acquireLock } from '../lock.ts';
+import { dataDir, dbPath, ensureDataDir, goldenSetPath, lockPath, settingsPath } from '../paths.ts';
+import { search, type SearchHit } from '../search.ts';
+import { deleteSecret, setSecret } from '../secrets.ts';
+import { loadSettings } from '../settings.ts';
+import { findOrCreateOnlySource, listSources, markSynced, setCloudAllowed } from '../sources.ts';
+import { bundlesFromBackup, readBackup } from '../stenograma/backup.ts';
+import { ingestBundles, reconcileSessions } from '../stenograma/ingest.ts';
+
+const USAGE = `Usage: yarn kb <command>
+
+  import <data.json>   Import a Stenograma backup's meetings (unzip -p backup.zip data.json > data.json), then embed
+                       them. Importing a newer backup again replaces the old one's meetings.
+  embed                Embed what's still in the queue (after an interrupted import)
+  search <query>       Hybrid search. --source <kind>, --from/--to <YYYY-MM-DD>, --person <name>, --limit <n>
+  ask <question>       An answer with citations, by the LLM of settings.json. Dates and a person are taken from the
+                       question; --source, --from, --to and --person set them instead
+  key set|delete <groq|gemini>
+                       Keep an LLM key in the keyring (typed without echo), or remove it
+  eval                 Recall@10 and MRR on the golden set (--golden <path>, default ${goldenSetPath()})
+  status               Sources, documents and the embedding queue
+  cloud <source> on|off
+                       Whether a source's content may go to a cloud LLM and cloud embeddings (F8)
+`;
+
+const { positionals, values } = parseArgs({
+  allowPositionals: true,
+  options: {
+    source: { type: 'string' },
+    from: { type: 'string' },
+    to: { type: 'string' },
+    person: { type: 'string' },
+    limit: { type: 'string' },
+    golden: { type: 'string' },
+    help: { type: 'boolean', short: 'h' },
+  },
+});
+
+const [command, ...args] = positionals;
+
+// A local date: --from is its start, --to the start of the next day
+const parseDay = (day: string | undefined, nextDay = false) => {
+  if (!day) {
+    return undefined;
+  }
+
+  const date = new Date(`${day}T00:00:00`);
+
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`Not a date: ${day} (YYYY-MM-DD)`);
+  }
+
+  if (nextDay) {
+    date.setDate(date.getDate() + 1);
+  }
+
+  return date.getTime();
+};
+
+const hitLine = (hit: SearchHit) => `${hit.title} · ${formatDay(hit.createdAt)}${formatMoment(hit.startMs)}${hit.madeByAi ? ' · made by AI' : ''}`;
+
+const describeRequest = (request: SearchRequest) => [
+  request.from !== undefined && ` · from ${formatDay(request.from)}`,
+  request.to !== undefined && ` · to ${formatDay(request.to - 1)}`,
+  request.person && ` · person: ${request.person}`,
+].filter(Boolean).join('');
+
+// Reads a line without echoing it, so a key is neither shown nor kept in the shell's history
+const readHidden = (prompt: string) => new Promise<string>((resolve) => {
+  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY });
+  process.stdout.write(prompt);
+  (rl as unknown as { _writeToOutput: (text: string) => void })._writeToOutput = () => undefined;
+  rl.question('', (answer) => {
+    rl.close();
+    process.stdout.write('\n');
+    resolve(answer.trim());
+  });
+});
+
+const progress = (label: string) => (done: number, total: number) => process.stdout.write(`\r${label} ${done}/${total}`);
+
+const embedQueue = async (db: Db) => {
+  const provider = createEmbeddingProvider(loadSettings().embedding);
+  const pending = pendingEmbeddings(db, provider);
+
+  if (!pending) {
+    console.log(`Nothing to embed with ${provider.id}`);
+
+    return;
+  }
+
+  const started = Date.now();
+  const done = await embedPending(db, provider, { onProgress: progress(`Embedding with ${provider.id}:`) });
+  console.log(`\nEmbedded ${done} chunks in ${Math.round((Date.now() - started) / 1000)} s`);
+};
+
+// Writes: holds the lock, so it never runs next to the app's core
+const withWritableDb = async (run: (db: Db) => Promise<void>) => {
+  ensureDataDir();
+  const release = acquireLock(lockPath());
+  const db = openDb(dbPath());
+
+  try {
+    await run(db);
+  } finally {
+    db.close();
+    release();
+  }
+};
+
+// Only reads, so it can run next to the app: the query's embedding isn't cached
+const withReadonlyDb = async (run: (db: Db) => Promise<void>) => {
+  if (!existsSync(dbPath())) {
+    throw new Error(`No knowledge base in ${dataDir()} yet: start with yarn kb import <data.json>`);
+  }
+
+  const db = openDb(dbPath(), { readonly: true });
+
+  try {
+    await run(db);
+  } finally {
+    db.close();
+  }
+};
+
+const commands: Record<string, () => Promise<void>> = {
+  import: () => withWritableDb(async (db) => {
+    const [path] = args;
+
+    if (!path) {
+      throw new Error('Usage: yarn kb import <data.json>');
+    }
+
+    const bundles = bundlesFromBackup(readBackup(path));
+    const source = findOrCreateOnlySource(db, 'stenograma-backup', basename(path));
+    const { embedding } = loadSettings();
+    const model = createEmbeddingProvider(embedding).id;
+    ingestBundles(db, source.id, bundles, model);
+    const removed = reconcileSessions(db, source.id, bundles.map((bundle) => bundle.session.sessionId));
+    markSynced(db, source.id);
+    console.log(`Imported ${bundles.length} sessions into source ${source.id}${removed ? `, removed ${removed} no longer in it` : ''}`);
+    await embedQueue(db);
+  }),
+
+  embed: () => withWritableDb(embedQueue),
+
+  search: () => withReadonlyDb(async (db) => {
+    const query = args.join(' ');
+
+    if (!query) {
+      throw new Error('Usage: yarn kb search <query>');
+    }
+
+    const provider = createEmbeddingProvider(loadSettings().embedding);
+    const { hits, warning } = await search(db, query, {
+      provider,
+      limit: values.limit ? Number(values.limit) : 10,
+      sourceKind: values.source,
+      from: parseDay(values.from),
+      to: parseDay(values.to, true),
+      person: values.person,
+    });
+
+    if (warning) {
+      console.log(`${warning}\n`);
+    }
+
+    hits.forEach((hit, index) => {
+      const snippet = hit.text.replace(/\s+/g, ' ').slice(0, 220);
+      console.log(`${index + 1}. ${hitLine(hit)}`);
+      console.log(`   ${snippet}${hit.text.length > 220 ? '…' : ''}\n`);
+    });
+
+    if (!hits.length) {
+      console.log('Nothing found');
+    }
+  }),
+
+  eval: () => withReadonlyDb(async (db) => {
+    const questions = readGoldenSet(values.golden ?? goldenSetPath());
+    const provider = createEmbeddingProvider(loadSettings().embedding);
+    const results = await evaluate(db, questions, provider);
+    console.log(`${questions.length} questions, embeddings ${provider.id}\n`);
+    console.log('group       recall@10  MRR@10  session@10');
+
+    for (const row of summarize(results)) {
+      console.log(`${`${row.group} (${row.questions})`.padEnd(12)}${row.recall.toFixed(2).padStart(9)}${row.mrr.toFixed(2).padStart(8)}${row.session.toFixed(2).padStart(12)}`
+        + `${row.unanswerable.length ? `   no answering chunk: ${row.unanswerable.join(', ')}` : ''}`);
+    }
+
+    console.log(`\nMissed: ${results.filter((result) => !result.rank).map((result) => result.id).join(', ') || 'none'}`);
+  }),
+
+  ask: () => withReadonlyDb(async (db) => {
+    const question = args.join(' ');
+
+    if (!question) {
+      throw new Error('Usage: yarn kb ask <question>');
+    }
+
+    const settings = loadSettings();
+    const model = createLanguageModel(settings.llm);
+    const request: SearchRequest = values.source || values.from || values.to || values.person
+      ? { query: question, from: parseDay(values.from), to: parseDay(values.to, true), person: values.person }
+      : await rewriteQuestion(model, settings.llm, question);
+    console.log(`Searching for: ${request.query}${describeRequest(request)}`);
+
+    const { query, ...filters } = request;
+    const { hits, warning } = await search(db, query, {
+      ...filters, provider: createEmbeddingProvider(settings.embedding), limit: 20, sourceKind: values.source,
+    });
+
+    if (warning) {
+      console.log(warning);
+    }
+
+    const prepared = prepareAnswer(db, settings.llm, question, hits);
+    const leftOut = prepared.leftOut ? `${prepared.leftOut} found chunks were left out: their sources don't allow a cloud LLM (F8)` : '';
+
+    if (!prepared.sources.length) {
+      console.log(`\nNothing found that answers it. ${leftOut}`);
+
+      return;
+    }
+
+    console.log(`Answering with ${settings.llm.provider} ${settings.llm.model}${isLocalLlm(settings.llm) ? ' (local)' : ''} from ${prepared.sources.length} chunks\n`);
+
+    let streamError: unknown;
+    const result = streamAnswer(model, settings.llm, prepared, (error) => {
+      streamError = error;
+    });
+    let answer = '';
+
+    for await (const part of result.textStream) {
+      answer += part;
+      process.stdout.write(part);
+    }
+
+    if (streamError) {
+      throw streamError;
+    }
+
+    const cited = citedNumbers(answer);
+    const uncited = prepared.sources.filter((source) => !cited.has(source.n)).length;
+    console.log('\n\nSources:');
+    prepared.sources.filter((source) => cited.has(source.n)).forEach((source) => console.log(`  [${source.n}] ${hitLine(source.hit)}`));
+    console.log([uncited && `  ${uncited} more given but not cited`, leftOut && `  ${leftOut}`].filter(Boolean).join('\n'));
+  }),
+
+  key: async () => {
+    const [action, provider] = args;
+
+    if (!['set', 'delete'].includes(action) || !['groq', 'gemini'].includes(provider)) {
+      throw new Error('Usage: yarn kb key set|delete <groq|gemini>');
+    }
+
+    if (action === 'delete') {
+      deleteSecret(llmKeyName(provider));
+      console.log(`Removed the ${provider} key`);
+
+      return;
+    }
+
+    const key = await readHidden(`Paste the ${provider} API key: `);
+
+    if (!key) {
+      throw new Error('No key given');
+    }
+
+    setSecret(llmKeyName(provider), key);
+    console.log(`Kept the ${provider} key. To answer with it, set "llm" in ${settingsPath()}`);
+  },
+
+  cloud: () => withWritableDb(async (db) => {
+    const [id, state] = args;
+
+    if (!id || !['on', 'off'].includes(state)) {
+      throw new Error('Usage: yarn kb cloud <source id> on|off (yarn kb status lists the sources)');
+    }
+
+    if (!setCloudAllowed(db, Number(id), state === 'on')) {
+      throw new Error(`No source ${id} (yarn kb status lists them)`);
+    }
+
+    console.log(`Source ${id}: a cloud LLM and cloud embeddings ${state === 'on' ? 'may now see' : 'no longer see'} its content`);
+  }),
+
+  status: () => withReadonlyDb(async (db) => {
+    const provider = createEmbeddingProvider(loadSettings().embedding);
+    console.log(`Knowledge base ${getKbId(db)} in ${dataDir()}`);
+    console.log(`Embeddings: ${provider.id}, ${pendingEmbeddings(db, provider)} chunks in the queue\n`);
+
+    for (const source of listSources(db)) {
+      console.log(`${source.id}. ${source.kind} ${source.account ?? ''} · ${source.documents} documents, ${source.chunks} chunks`
+        + ` · cloud ${source.cloudAllowed ? 'allowed' : 'not allowed'}`
+        + ` · last sync ${source.lastSyncAt ? new Date(source.lastSyncAt).toLocaleString() : 'never'}${source.lastError ? ` · error: ${source.lastError}` : ''}`);
+    }
+  }),
+};
+
+if (values.help || !command || !commands[command]) {
+  console.log(USAGE);
+  process.exitCode = command && !values.help ? 1 : 0;
+} else {
+  try {
+    await commands[command]();
+  } catch (error) {
+    console.error(`kb ${command}: ${(error as Error).message}`);
+    process.exitCode = 1;
+  }
+}

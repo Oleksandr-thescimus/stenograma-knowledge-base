@@ -56,6 +56,64 @@ on the release") and draft replies to new emails and messages.
     not copied.
   - `cn` from the `cn` package (shadcn's replacement for clsx and tailwind-merge), which the shadcn registry's
     components import. Pinned to 0.5.1: 0.5.2 came out the same day.
+- **M0, Electron: the core runs inside it.**
+  - better-sqlite3 13.0.3 with sqlite-vec 0.1.9 and FTS5 works under Electron's Node (`tests/sqlite.test.ts`) and in a
+    `utilityProcess` of the packaged app, unpacked and as the AppImage. vec0's metadata columns filter inside the
+    nearest-neighbour search.
+  - better-sqlite3 13 is Node-API with prebuilt binaries, so nothing is rebuilt for Electron. sqlite-vec loads from
+    `app.asar.unpacked` ([why](#why-electron-with-a-core-of-its-own)).
+  - `@napi-rs/keyring` 2.1.2 stores, reads and deletes a secret on this desktop (gnome-keyring), in a `utilityProcess`
+    too.
+  - better-sqlite3 adds 27 MB to the package: every platform's binary and its sources. M3 leaves them out with
+    electron-builder's `files`.
+- **M0, drafts with Ollama.** `qwen3.5:9b` runs 66% on the 6 GB GPU and 34% on the CPU. A draft from a 5000-token
+  prompt takes ~37 s cold: 9 s to load, 16 s for the prompt, 11 s for ~110 tokens at ~10 tokens/s. With the model
+  loaded it's ~28 s. That's within the minute only with thinking off: with it, there was no reply in 5 minutes.
+- **M0, tokens (a first sign):** Ukrainian text gave 2.84 characters per token with qwen's tokenizer, so
+  `estimateTokens` (`length / 3`) counts ~5% short. Groq's `usage.prompt_tokens` is still to compare.
+- **M0, the golden set:** 22 questions about 15 meetings of the backup of 2026-11-01, each with the session and a quote
+  that marks the answering chunk, and a hard paraphrase of each without the passage's words. Claude wrote them from
+  passages, so the direct ones share words with the answer; questions in my own words are still to add.
+- **M0, embeddings: Ollama's bge-m3 is the default.** Recall@10 on the 3533 chunks of the backup's 184 meetings:
+
+  | | Direct (22) | Paraphrased (22) | All (44) |
+  |---|---|---|---|
+  | BM25 | 0.95 | 0.18 | 0.57 |
+  | bge-m3 | 0.95 | 0.68 | 0.82 |
+  | bge-m3 + BM25 at half weight | 1.00 | 0.68 | **0.84** |
+  | multilingual-e5-base (q8) | 0.64 | 0.50 | 0.57 |
+  | e5-base + BM25 at half weight | 0.86 | 0.64 | 0.75 |
+
+  - Fusion with BM25 at full weight drops paraphrases to 0.59: BM25's noise pushes the right chunk down. So BM25
+    counts half in the fusion ([F5](#functional)), to be tuned with `kb eval`.
+  - A second vector model in the fusion adds nothing.
+  - Speed: bge-m3 on the GPU 8300 characters/s, e5-base on the CPU 4900. An hour of meeting is ~35 000 characters, so
+    4 s and 7 s; the whole backup 7.5 and 13 minutes. A year of email and chats (~100k chunks) would take ~3.5 and ~6
+    hours.
+  - transformers.js with e5-base stays as the fallback for a machine without Ollama, with lower recall.
+  - Only 415 of the chunks have a start: older captions have no timestamps, so their citations link to the meeting.
+  - Captions repeat phrases ("Ну дивись більшістьНу дивись більшість"). The chunker could drop the repeats in M1.
+- **Still open in M0:** Gemini's embeddings (no key yet), the golden set reviewed with questions of my own, Groq's
+  token count, the keyring still locked right after login, and access to each source.
+- **M1, the core and `kb`.** `kb import`, `search`, `ask` and `eval` work on the backup of 2026-11-01: 184 sessions,
+  3539 chunks, embedded in 7 minutes.
+  - `kb eval`: recall@10 1.00 direct, 0.68 paraphrased, **0.84** all; MRR 0.58. The same as M0's scripts.
+  - Search at 100k generated chunks (`yarn bench`): p95 120 ms, 192 ms with source and date filters, plus ~50–90 ms to
+    embed the query with bge-m3. Bit vectors with rescoring (Scale) gave the same `kb eval` as float32.
+  - `kb ask` with `qwen3.5:9b` on Ollama: ~55 s with the model cold, rewrite included. Groq and Gemini aren't tried
+    yet (no keys).
+- **M1 decisions:**
+  - `kb` runs `core/*.ts` as they are under Electron's Node, which strips the types, so there's no build step:
+    `core/` is ESM with `.ts` imports.
+  - AI SDK 6, as the extension, though 7 is out: no code is shared, but the extension's use of it is the reference.
+  - `kb search`, `ask` and `eval` open the knowledge base readonly and don't cache the query's embedding, so they run
+    next to the app's core. Only `kb import` writes for now, under a lock file the app's core and `kb serve` will take
+    too.
+  - One `stenograma-backup` source: a newer backup replaces the older one's meetings instead of adding them again.
+  - `cloudAllowed` is a column of `sources`, set with `kb cloud <source> on|off` rather than in the settings file.
+  - The default LLM in `settings.json` is `qwen3.5:9b` on Ollama, which needs no key; `kb key set` keeps a Groq or
+    Gemini key in the keyring. Rewrites and answers on Ollama run without thinking.
+  - Not in M1: transformers.js (Ollama is the default), so limiting onnxruntime's threads waits for it.
 
 ## Why Electron, with a core of its own
 
@@ -72,9 +130,12 @@ Running the core inside the app means:
 - Syncing, polling and the extension's pushes work only while the app runs, so it starts at login and closing the
   window leaves it in the tray. The extension shows that the knowledge base isn't running and tries again at its next
   alarm.
-- Native modules are built for Electron's Node. Only `better-sqlite3` needs it (electron-builder's `install-app-deps`):
-  `sqlite-vec` is a loadable SQLite extension, `@napi-rs/keyring` and `onnxruntime-node` use N-API. Tests and `kb eval`
-  run under Electron's Node (`ELECTRON_RUN_AS_NODE=1`), so one build serves both.
+- Native modules need no build for Electron: better-sqlite3 (from 13), `@napi-rs/keyring` and `onnxruntime-node` use
+  Node-API with prebuilt binaries, and `sqlite-vec` is a loadable SQLite extension.
+  - In a packaged app electron-builder puts their binaries in `app.asar.unpacked` by itself. But `sqlite-vec`'s
+    `getLoadablePath()` points inside `app.asar`, which SQLite's `dlopen` can't read, so the core loads it from the
+    `app.asar.unpacked` path.
+  - Tests and `kb eval` run under Electron's Node (`ELECTRON_RUN_AS_NODE=1`), the runtime the core has in the app.
 
 Alternatives considered:
 
@@ -172,11 +233,13 @@ Alternatives considered:
   - A restart continues from the cursor.
   - "Sync now", and a status per source: last sync, document count, last error, embedding queue.
 - **F5. Search.**
-  - Hybrid: BM25 (FTS5) plus vectors, merged with reciprocal rank fusion.
+  - Hybrid: BM25 (FTS5) plus vectors, merged with reciprocal rank fusion, BM25 at half weight (M0).
   - Filters: source, date range, person. They're set by hand or taken from the question (F6).
   - A date range filters. A person only raises the rank of chunks whose author or participants match, since one person
     is written differently in Meet, email and Telegram and there's no people directory in v1. Names are compared
-    lower-cased, with Cyrillic transliterated to Latin.
+    lower-cased, with Cyrillic transliterated to Latin and the usual spellings merged (g/h, kh/h, y/j/i, doubled
+    letters): "Олег" matches "Oleg" and "Oleh", "Юлія" matches "Yulija". A chunk where the person speaks is raised
+    more than one from a meeting they were in.
   - Ukrainian and English, mixed.
 - **F6. Answers.**
   - Streamed, with `[n]` citations linking to the source (a meeting at the cited moment, an email, a message).
@@ -207,7 +270,8 @@ Alternatives considered:
     that aren't the conversation itself. The incoming message is written by someone else and can ask for anything
     ("add the latest budget figures"), and the approval is what stops it.
   - F8 applies: with a cloud LLM, only `cloudAllowed` sources go into the draft. A message from a source without
-    `cloudAllowed` gets its draft from Ollama; when Ollama isn't running it gets none, and the queue says why.
+    `cloudAllowed` gets its draft from Ollama, with thinking off (M0); when Ollama isn't running it gets none, and the
+    queue says why.
   - Sending goes through the source as a reply in the same thread (the Reply column of [Connectors](#connectors)). A
     log keeps what was sent: ids, time, conversation.
   - Drafts need new messages within a minute, not 5–15. Sources with live connections use them (Slack Socket Mode,
@@ -249,7 +313,7 @@ Alternatives considered:
   - Retries with backoff that honour `Retry-After` (Graph, Slack), `FLOOD_WAIT` (Telegram) and Gmail quotas.
 - **N6. Quality.**
   - A private golden set of ~30 questions with their expected sources, kept outside the repo (it's about real
-    meetings).
+    meetings): `~/.local/share/stenograma-kb/eval/golden-set.json`, mode 0600.
   - M0 starts it with meetings, read from `data.json` of a Stenograma backup; each connector adds a few questions
     about its source.
   - Target recall@10 ≥ 0.8. The set picks the embedding model and is a regression check.
@@ -288,9 +352,9 @@ without approval, a people directory that joins one person's names across source
   - `stenograma_rows`: the rows a browser pushed (source, table, key, JSON), so the core can index them again when the
     rules of F1 change, without a push.
   - `chunks_fts`.
-  - `vec_<model>`: a vector table per embedding model, so the model can change without downtime. `sourceKind` and
-    `createdAt` are its metadata columns.
-  - `embedding_cache`: model, textHash, vector.
+  - `vec_<model>`: a vector table per embedding model, so the model can change without downtime. It holds bit vectors
+    (the signs), and `sourceKind` and `createdAt` are its metadata columns.
+  - `embedding_cache`: model, textHash, vector (float32). Also where the search rescores its candidates from.
   - `jobs`: the embedding queue, with retries.
   - `drafts`: source, conversation, the message replied to, text, the chunks used, status (`pending`, `sent`,
     `dismissed`), createdAt; and `sent_log`.
@@ -300,7 +364,8 @@ without approval, a people directory that joins one person's names across source
     reads at most 512 tokens, which the ~400-token chunks stay under;
   - Gemini `gemini-embedding-001` with `outputDimensionality: 768` (3072 by default, four times the storage).
 
-  The default is picked in M0 with the golden set. Gemini API's free tier may use what it's sent to improve
+  M0 picked Ollama's bge-m3 as the default ([Decisions](#decisions)); transformers.js is for a machine without
+  Ollama. Gemini API's free tier may use what it's sent to improve
   Google's products, so email and chats go to it only on a paid tier or with `cloudAllowed`. Groq has no embeddings.
 - **BM25 for Ukrainian.**
   - FTS5 with `unicode61`. Text and queries are normalized first: the apostrophes `'`, `’` and `` ` `` become `ʼ`
@@ -309,10 +374,13 @@ without approval, a people directory that joins one person's names across source
     4 letters, and is matched as a prefix ("бюджету" → `бюджет*`).
   - Checked on the golden set; the fallback is the `trigram` tokenizer.
 - **Scale.**
-  - Roughly 100k chunks for a year of email and chats, about 400 MB of float32 vectors.
+  - Roughly 100k chunks for a year of email and chats: about 400 MB of float32 vectors in `embedding_cache` and 13 MB
+    of bit vectors in `vec_<model>`.
   - Source and date filters are metadata columns of `vec0` (sqlite-vec 0.1.6+), so they apply inside the
     nearest-neighbour search. Filtering a top 50 afterwards can leave nothing.
-  - If search is slower than N3, store `int8` vectors in sqlite-vec and rescore the top results.
+  - A float32 scan of 100k vectors took ~250 ms, more than N3 allows, and `int8` was slower still in sqlite-vec 0.1.9.
+    So `vec0` searches bit vectors by Hamming distance for 400 candidates, and their float vectors from
+    `embedding_cache` rank them (M1).
 - **API for the extension.**
   - `POST /ingest`: session bundles (step 1 of [Sending](#sending-stenograma-data-from-the-extension)).
   - `POST /ingest/reconcile`: every session id the browser still has; the rest of its documents is deleted.
@@ -454,7 +522,7 @@ for one person, not counting the wait for a store review.
 | M6 | Messengers | Telegram, Rocket.Chat and Slack too | 5–8 days |
 | M7 | Reply drafts | Drafts for new emails and messages within a minute, reviewed in the app and copied into the source by hand | 5–7 days |
 | M8 | Sending replies | An approved draft is sent from the app, in the same thread | 3–5 days |
-| Later | Improvements | Reranker, int8 vectors, "ask the knowledge base" in the Meet panel, Zoom | as needed |
+| Later | Improvements | Reranker, "ask the knowledge base" in the Meet panel, Zoom | as needed |
 
 - M0 → M1 → M2 → M3 in this order. M4–M6 can go in any order after M3. Microsoft goes first: one sign-in covers
   two sources, and it brings both the email and the chat chunker. M7 and M8 use the sources connected by then.
@@ -512,7 +580,7 @@ Questions about meetings are answered with citations, before any UI or change to
     push search past N3;
   - FTS5 normalization and hybrid search with filters (F5);
   - the rewrite and answers (F6), within the budget (N4);
-  - `cloudAllowed` (F8), set in the settings file until M3.
+  - `cloudAllowed` (F8), set with `kb cloud` until M3.
 - **Settings and secrets.** A settings file in the data directory, LLM keys in the keyring (N1). The core that syncs
   holds a lock file there: `kb search` and `kb ask` only read, and `kb import` and `kb serve` refuse to run next to the
   app. Caching a query's embedding in `embedding_cache` would make `kb search` and `kb ask` write too, so either
@@ -639,7 +707,7 @@ Exit:
 
 ### Later
 
-- A reranker; `int8` vectors when search is slower than N3.
+- A reranker.
 - "Ask the knowledge base" in the Meet panel (`POST /search`), with an extension release.
 - [Zoom recordings](#later-zoom-recordings); the rest of [Not in v1](#not-in-v1).
 

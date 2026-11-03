@@ -8,7 +8,8 @@ Stenograma KB is a personal knowledge base on this machine: meetings from the St
 and messenger chats, searched together, with answers that cite their sources and drafts of replies. An Electron app
 runs it. [docs/PLAN.md](docs/PLAN.md) is the plan: requirements, architecture, milestones and the dated decisions.
 
-Only the app's skeleton exists so far; the next milestone is M0 (spikes).
+M0 (spikes) is done but for the checks that need the user; M1 (meetings in the terminal, `yarn kb`) is under way. The
+app is still a skeleton.
 
 The extension is another repo, [stenograma](https://github.com/Oleksandr-thescimus/stenograma), checked out next to
 this one as `../stenograma`. The two meet only at the HTTP API, with no submodule or shared package. Open both with
@@ -22,13 +23,25 @@ Uses yarn (`yarn.lock`).
 - `yarn build`: main, preload and renderer into `out/`; `yarn start` runs that build.
 - `yarn dist`: an AppImage and a `.deb` in `dist/` (electron-builder, `electron-builder.yml`).
 - `yarn lint`, `yarn typecheck` (the Node project `tsconfig.node.json` and the web project `tsconfig.web.json`).
-- `yarn test`: Vitest under Electron's Node (`ELECTRON_RUN_AS_NODE=1` with the electron binary), because native
-  modules are built for Electron's ABI by `electron-builder install-app-deps` (postinstall).
+- `yarn test`: Vitest under Electron's Node (`ELECTRON_RUN_AS_NODE=1` with the electron binary), the runtime the core
+  has in the app.
+- `yarn kb <command>`: the core from the command line, `core/cli/kb.ts` run as TypeScript under Electron's Node
+  (`yarn kb --help`): `import` a backup's `data.json`, `search`, `ask`, `eval` on the golden set, `status`, `key`.
+  It works on the real knowledge base in `~/.local/share/stenograma-kb/`; `STENOGRAMA_KB_DATA` points it elsewhere.
+- `yarn bench [chunks]`: search timings on a throwaway knowledge base of generated chunks (N3: p95 under 300 ms at 100k).
 
 ## Layout
 
-- `core/`: the knowledge base itself: storage, connectors, the pipeline, search, answers, drafts and the HTTP API for
-  the extension. It never imports `electron`, so the `kb` commands and the tests run it in plain Node. Not started.
+- `core/`: the knowledge base itself, without `electron`, so `kb` and the tests run it too.
+  - `db.ts` (schema and migrations), `documents.ts` (documents, chunks, FTS rows, embedding jobs), `sources.ts`.
+  - `stenograma/`: the protocol's types (`API_VERSION`), the rules of F1, ingesting bundles, reading a backup.
+  - `chunk.ts`, `text/normalize.ts` (FTS normalization, Ukrainian endings, name matching), `search.ts` (hybrid).
+  - `embed/`: providers (Ollama, Gemini), vector tables (bit vectors, rescored from `embedding_cache`), the cache and
+    the queue. `llm.ts`, `answer/` (rewrite,
+    answers), `secrets.ts` (keyring), `settings.ts`, `lock.ts`, `eval.ts`, `cli/kb.ts`.
+  - Node runs these files as they are, stripping the types: `core/package.json` makes them ESM, imports name the
+    `.ts` file, type-only imports say `import type`, and there's no enum, namespace or parameter property
+    (`erasableSyntaxOnly`).
 - `app/main`: Electron's main process.
 - `app/preload`: exposes `window.kb` to the renderer through `contextBridge`. Its type, `KbApi` in
   `app/preload/api.ts`, is shared with the renderer.
@@ -38,12 +51,14 @@ Uses yarn (`yarn.lock`).
   - Components come from `npx shadcn@latest add <name>` into `src/components/ui` (`components.json`). Run
     `yarn lint:fix` after it: the registry's code has double quotes and no semicolons. They import `cn` from the `cn`
     package.
-- `tests/`: Vitest.
+- `tests/`: Vitest. `tests/core/helpers.ts` makes a knowledge base in a temporary file and a fake embedding provider.
 
 electron-vite reads the entries from `electron.vite.config.ts`, since they aren't in its default `src/`.
 
-Packages go to `devDependencies`, so Vite bundles them. `dependencies` is only for what can't be bundled, such as
-native modules (better-sqlite3): electron-vite leaves those external and electron-builder packs them into the app.
+Packages go to `devDependencies`, so Vite bundles them. `dependencies` is only for what can't be bundled: native
+modules and loadable extensions (better-sqlite3, sqlite-vec, `@napi-rs/keyring`). electron-vite leaves those external
+and electron-builder packs them into the app, in `app.asar.unpacked`. SQLite can't load an extension from inside
+`app.asar`, so in a packaged app sqlite-vec is loaded from its `app.asar.unpacked` path, not with `sqliteVec.load()`.
 
 ## The renderer is untrusted
 
@@ -68,6 +83,8 @@ wrote them.
 - Don't send them to a new external service or host without discussing it first. They go only to the AI providers
   chosen in the app, and only from sources with `cloudAllowed` (F8 in the plan).
 - Data stays in `~/.local/share/stenograma-kb/` (mode 0700). Secrets go to the OS keyring (N1 in the plan).
+- The golden set (`eval/golden-set.json` there) quotes real meetings, so it never goes into the repo; tests use made-up
+  text.
 
 ## Keeping docs current
 
