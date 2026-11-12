@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 import { citedNumbers, prepareAnswer, streamAnswer } from '../answer/answer.ts';
 import { rewriteQuestion, type SearchRequest } from '../answer/rewrite.ts';
-import { BROWSER_KIND, createBrowserSource } from '../browsers.ts';
+import { BROWSER_KIND, createBrowserSource, renewBrowserToken } from '../browsers.ts';
 import { getKbId, openDb, type Db } from '../db.ts';
 import { embeddingModelId, isLocalEmbedding } from '../embed/provider.ts';
 import { embedPending, pendingEmbeddings } from '../embed/store.ts';
@@ -37,6 +37,7 @@ const USAGE = `Usage: yarn kb <command>
   eval                 Recall@10 and MRR on the golden set (--golden <path>, default ${goldenSetPath()})
   serve                The API for the extension on 127.0.0.1 (the port in settings.json), embedding what it pushes
   add-browser [label]  Pair a browser: makes its source and prints the token to paste into the extension's popup
+  new-token <source>   A new token for a paired browser whose token is lost; the old one stops working
   remove <source>      Remove a source with all its documents
   status               Sources, documents and the embedding queue
   cloud <source> on|off
@@ -164,7 +165,7 @@ const commands: Record<string, () => Promise<void>> = {
     const { embedding } = loadSettings();
     const model = embeddingModelId(embedding);
     ingestBundles(db, source.id, bundles, model);
-    const removed = reconcileSessions(db, source.id, bundles.map((bundle) => bundle.session.sessionId));
+    const removed = reconcileSessions(db, source.id, bundles.map((bundle) => bundle.session.sessionId), model);
     markSynced(db, source.id);
     console.log(`Imported ${bundles.length} sessions into source ${source.id}${removed ? `, removed ${removed} no longer in it` : ''}`);
     await embedQueue(db);
@@ -363,7 +364,7 @@ const commands: Record<string, () => Promise<void>> = {
     const { source, token } = createBrowserSource(db, label);
     console.log(`Paired "${label}" as source ${source.id}. Paste this token into the extension's popup, under "Local knowledge base":`);
     console.log(`\n  ${token}\n`);
-    console.log('It\'s shown only now: the knowledge base keeps only its hash.');
+    console.log(`It's shown only now: the knowledge base keeps only its hash. If it's lost, yarn kb new-token ${source.id} makes another.`);
 
     const backup = listSources(db).find((candidate) => candidate.kind === 'stenograma-backup');
 
@@ -371,9 +372,25 @@ const commands: Record<string, () => Promise<void>> = {
       const answer = await readLine(`\nRemove source ${backup.id}, the imported backup (${backup.documents} documents)? Once this browser pushes, each of its meetings would be found twice. [y/N] `);
 
       if (/^y/i.test(answer)) {
-        removeSource(db, backup.id);
+        removeSource(db, backup.id, embeddingModelId(loadSettings().embedding));
         console.log(`Removed source ${backup.id}`);
       }
+    }
+  }),
+
+  'new-token': () => withWritableDb(async (db) => {
+    const source = listSources(db).find((candidate) => candidate.id === Number(args[0]) && candidate.kind === BROWSER_KIND);
+
+    if (!source) {
+      throw new Error('Usage: yarn kb new-token <browser source id> (yarn kb status lists them)');
+    }
+
+    const answer = await readLine(`The current token of source ${source.id} (${source.account ?? ''}) stops working. Make a new one? [y/N] `);
+
+    if (/^y/i.test(answer)) {
+      const token = renewBrowserToken(db, source.id);
+      console.log(`Paste this token into the extension's popup, under "Local knowledge base":\n\n  ${token}\n`);
+      console.log('Its meetings stay: the browser continues the same source.');
     }
   }),
 
@@ -387,7 +404,7 @@ const commands: Record<string, () => Promise<void>> = {
     const answer = await readLine(`Remove source ${source.id} (${source.kind} ${source.account ?? ''}) with its ${source.documents} documents? [y/N] `);
 
     if (/^y/i.test(answer)) {
-      removeSource(db, source.id);
+      removeSource(db, source.id, embeddingModelId(loadSettings().embedding));
       console.log(`Removed source ${source.id}`);
     }
   }),
@@ -413,7 +430,8 @@ const commands: Record<string, () => Promise<void>> = {
     console.log(`Embeddings: ${provider.id}, ${pendingEmbeddings(db, provider)} chunks in the queue\n`);
 
     for (const source of listSources(db)) {
-      console.log(`${source.id}. ${source.kind} ${source.account ?? ''} · ${source.documents} documents, ${source.chunks} chunks`
+      const elsewhere = source.indexedElsewhere ? ` · ${source.indexedElsewhere} meetings indexed from another browser` : '';
+      console.log(`${source.id}. ${source.kind} ${source.account ?? ''} · ${source.documents} documents, ${source.chunks} chunks${elsewhere}`
         + ` · cloud ${source.cloudAllowed ? 'allowed' : 'not allowed'}`
         + ` · last sync ${source.lastSyncAt ? new Date(source.lastSyncAt).toLocaleString() : 'never'}${source.lastError ? ` · error: ${source.lastError}` : ''}`);
     }

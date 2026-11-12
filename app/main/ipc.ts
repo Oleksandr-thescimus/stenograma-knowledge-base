@@ -35,6 +35,7 @@ export const PARAMS: { [M in keyof AppMethods]: z.ZodType<AppMethods[M]['params'
   summarize: MEETING.extend({ summaryId: z.string().min(1).max(100) }).strict(),
   cancelSummary: z.object({ summaryId: z.string().min(1).max(100) }).strict(),
   addBrowser: z.object({ label: z.string().max(100) }).strict(),
+  renewBrowserToken: z.object({ sourceId: ID }).strict(),
   removeSource: z.object({ sourceId: ID }).strict(),
   setCloudAllowed: z.object({ sourceId: ID, allowed: z.boolean() }).strict(),
   getSettings: NO_PARAMS,

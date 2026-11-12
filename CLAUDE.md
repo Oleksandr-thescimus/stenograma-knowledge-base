@@ -30,7 +30,8 @@ Uses yarn (`yarn.lock`).
   has in the app.
 - `yarn kb <command>`: the core from the command line, `core/cli/kb.ts` run as TypeScript under Electron's Node
   (`yarn kb --help`): `import` a backup's `data.json`, `search`, `ask`, `eval` on the golden set, `status`, `key`,
-  `serve` (the API for the extension, as the app runs it), `add-browser` (pairs a browser), `remove`, `cloud`.
+  `serve` (the API for the extension, as the app runs it), `add-browser` (pairs a browser), `new-token` (a paired
+  browser's new token), `remove`, `cloud`.
   It works on the real knowledge base in `~/.local/share/stenograma-kb/`; `STENOGRAMA_KB_DATA` points it elsewhere.
 - `yarn bench [chunks]`: search timings on a throwaway knowledge base of generated chunks (N3: p95 under 300 ms at 100k).
 

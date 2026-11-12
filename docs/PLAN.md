@@ -210,6 +210,29 @@ on the release") and draft replies to new emails and messages.
     its default model (`qwen3.5:9b`), as drafts will be; the error says so when Ollama doesn't answer.
   - Closing the view stops it, and a stopped summary isn't kept.
 
+2026-11-12:
+
+- **A browser's lost token is replaced, not shown again.** "New token" in Sources (`kb new-token <source>`) gives a
+  paired browser a new token for the same source: its meetings, vectors and the chats' citations stay, and the old
+  token stops working. The knowledge base still keeps only the token's hash.
+  - Showing it again would mean keeping the token itself, and would make it easy to paste one token into two browsers,
+    whose reconciles would then delete each other's meetings. The tokens already given out are hashes only anyway.
+- **A meeting that several browsers send is indexed once** (a backup restored in Chrome and in Firefox). Before, it was
+  found twice, and its copies took two of an answer's few places (6 on Groq's free tier).
+  - Each browser's rows are kept. The copy indexed is the one that came last, as the extension sends a session only
+    when it changed in that browser; one with the same rows (by content, their keys in any order) leaves the indexed
+    copy, so a browser sending everything again after a new token changes nothing.
+  - When the indexed copy goes (deleted in its browser, or the browser removed), the copy of the browser paired last
+    takes over. The short summary moves to it; saved chats show the old copy's citations as removed.
+  - Skipping the later copy at a push wasn't taken: a meeting deleted in the first browser would then leave the
+    knowledge base while the other still had it, as the extension doesn't send a session again until it changes, and
+    the other browser's changes to it would be lost.
+  - Sources tells how many of a browser's meetings are found through another browser's copy. "Open in Stenograma" opens
+    the indexed copy, in its own browser.
+  - An imported backup stays apart: it's removed once a browser is paired (F7).
+  - A migration cut the copies indexed before to one: that of the browser that sent last. In the knowledge base then,
+    Chrome and Firefox2 had 252 sessions in common, all with the same rows, and Firefox2's copies were kept.
+
 ## Why Electron, with a core of its own
 
 Email and messengers need a process of their own on the machine: a browser can't poll sources while it's closed, and an
@@ -298,6 +321,8 @@ Alternatives considered:
   - The extension sends a session's rows (step 1 of [Sending](#sending-stenograma-data-from-the-extension)). The core
     keeps them and picks what to index by the rules below, so a change to the rules is a core update, and the core
     indexes its copy again without a push.
+  - A session that several browsers send is indexed once, from the copy that changed last ([Decisions](#decisions),
+    2026-11-12).
   - One text per session, so a meeting isn't found twice:
     - a Meet call's own text (speaker names from the captions, and chat);
     - its latest `done` version from `transcripts` only when it has no captions, since a version made from the audio
@@ -350,7 +375,8 @@ Alternatives considered:
   - The same LLM providers as the extension: Groq, Gemini, Ollama. Their keys are entered in the app; the extension's
     stay in the browser.
 - **F7. Management.**
-  - Connect, disconnect and remove a source (with all its documents and tokens). A paired browser is a source too.
+  - Connect, disconnect and remove a source (with all its documents and tokens). A paired browser is a source too, and
+    gets a new token when its own is lost.
   - Change the embedding model, with the index rebuilt in the background.
   - Rebuild the whole index.
 - **F8. Cloud policy per source.**
@@ -450,7 +476,7 @@ without approval, a people directory that joins one person's names across source
   - `chunks`: documentId, ord, text with a context header ("[Email · subject · from · date]"), textHash, startMs for
     transcripts.
   - `stenograma_rows`: the rows a browser pushed (source, table, key, JSON), so the core can index them again when the
-    rules of F1 change, without a push.
+    rules of F1 change, without a push, and another browser's copy of a session can take over.
   - `chunks_fts`.
   - `vec_<model>`: a vector table per embedding model, so the model can change without downtime. It holds bit vectors
     (the signs), and `sourceKind` and `createdAt` are its metadata columns.
@@ -588,7 +614,7 @@ Private Telegram chats have no links to a message, so their citations show the m
    - The app's "Add a browser" makes a Stenograma source with its own token, which is pasted into the popup.
    - Chrome and Firefox keep separate histories, and a reconcile from one must not delete the other's meetings.
    - After reinstalling the extension, pasting the same token continues the same source, and the reconcile removes
-     what the browser no longer has.
+     what the browser no longer has. A lost token is replaced by a new one for the same source ("New token" in Sources).
 7. **Chunking, in the core.**
    - Transcript chunks are at most ~400 tokens (about a minute of talk), cut on message boundaries from the start. As
      a live meeting grows, earlier chunks stay the same and only the last ones are embedded again (N5).

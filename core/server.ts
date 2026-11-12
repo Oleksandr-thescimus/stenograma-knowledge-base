@@ -131,7 +131,7 @@ export const buildServer = ({ db, port, embedModel, onChange, log = () => undefi
     }
 
     const sourceId = request.browser!.id;
-    const removed = reconcileSessions(db, sourceId, request.body.sessionIds);
+    const removed = reconcileSessions(db, sourceId, request.body.sessionIds, embedModel());
     log(`reconcile: source ${sourceId}, ${request.body.sessionIds.length} sessions kept, ${removed} removed`);
 
     if (removed) {

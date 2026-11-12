@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Archive, Globe, Plus, Trash2 } from 'lucide-react';
+import { Archive, Globe, KeyRound, Plus, Trash2 } from 'lucide-react';
 import type { SourceInfo } from '../../../../core/protocol';
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader,
@@ -8,6 +8,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import AddBrowserDialog from '@/components/AddBrowserDialog';
+import NewTokenDialog from '@/components/NewTokenDialog';
 import { formatWhen, sourceName } from '@/lib/format';
 import { errorMessage, useAppStatus } from '@/lib/kb';
 
@@ -21,7 +22,13 @@ const describeSync = (source: SourceInfo) => {
   return `${source.kind === 'stenograma-browser' ? 'Last push' : 'Imported'} ${formatWhen(source.lastSyncAt)}`;
 };
 
-const SourceCard = ({ source, onRemove }: { source: SourceInfo, onRemove: (source: SourceInfo) => void }) => {
+interface SourceCardProps {
+  source: SourceInfo;
+  onRenewToken: (source: SourceInfo) => void;
+  onRemove: (source: SourceInfo) => void;
+}
+
+const SourceCard = ({ source, onRenewToken, onRemove }: SourceCardProps) => {
   const [error, setError] = useState<string | null>(null);
   const Icon = source.kind === 'stenograma-browser' ? Globe : Archive;
 
@@ -42,6 +49,11 @@ const SourceCard = ({ source, onRemove }: { source: SourceInfo, onRemove: (sourc
           <p className="text-sm text-muted-foreground">
             {source.documents} documents · {source.chunks} chunks · {describeSync(source)}
           </p>
+          {source.indexedElsewhere > 0 && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {source.indexedElsewhere} of its meetings came from another browser too, and are found through that copy.
+            </p>
+          )}
           {source.kind === 'stenograma-browser' && (
             <p className="mt-1 text-xs text-muted-foreground">
               The extension sends changes every 5 minutes; its popup has &quot;Sync now&quot;.
@@ -59,6 +71,12 @@ const SourceCard = ({ source, onRemove }: { source: SourceInfo, onRemove: (sourc
               : 'Only Ollama on this computer sees it; with a cloud model it\'s left out of answers.'}
           </p>
         </div>
+        {source.kind === 'stenograma-browser' && (
+          <Button variant="ghost" size="sm" onClick={() => onRenewToken(source)}>
+            <KeyRound />
+            New token
+          </Button>
+        )}
         <Button variant="ghost" size="icon-sm" onClick={() => onRemove(source)} aria-label={`Remove ${sourceName(source)}`}>
           <Trash2 />
         </Button>
@@ -71,6 +89,7 @@ const SourcesPage = () => {
   const status = useAppStatus();
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<SourceInfo | null>(null);
+  const [renewing, setRenewing] = useState<SourceInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const core = status?.core;
   const sources = core?.sources ?? [];
@@ -100,7 +119,7 @@ const SourcesPage = () => {
         </div>
         {error && <p className="text-sm text-destructive">{error}</p>}
         <div className="space-y-3">
-          {sources.map((source) => <SourceCard key={source.id} source={source} onRemove={setRemoving} />)}
+          {sources.map((source) => <SourceCard key={source.id} source={source} onRenewToken={setRenewing} onRemove={setRemoving} />)}
           {core && !sources.length && (
             <p className="text-sm text-muted-foreground">
               No sources yet. Add a browser and paste its token into Stenograma&apos;s popup, and its meetings arrive within
@@ -138,6 +157,7 @@ const SourcesPage = () => {
         )}
       </div>
       <AddBrowserDialog open={adding} onClose={() => setAdding(false)} backup={sources.find((source) => source.kind === 'stenograma-backup')} />
+      <NewTokenDialog source={renewing} onClose={() => setRenewing(null)} />
       <AlertDialog open={Boolean(removing)} onOpenChange={(open) => !open && setRemoving(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -145,7 +165,8 @@ const SourcesPage = () => {
             <AlertDialogDescription>
               Its {removing?.documents} documents go from the knowledge base. Chats keep their answers, with its
               citations shown as removed.
-              {removing?.kind === 'stenograma-browser' && ' Its token stops working: to send again, the browser needs a new one.'}
+              {removing?.kind === 'stenograma-browser'
+                && ' Meetings another browser sent too stay, found through its copy. Its token stops working: to send again, the browser needs to be added again.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

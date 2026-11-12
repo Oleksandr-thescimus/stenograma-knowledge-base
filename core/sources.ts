@@ -1,5 +1,7 @@
+import { BROWSER_KIND } from './browsers.ts';
 import type { Db } from './db.ts';
 import { deleteDocument } from './documents.ts';
+import { reconcileSessions } from './stenograma/ingest.ts';
 
 export interface Source {
   id: number;
@@ -44,14 +46,19 @@ export interface SourceStatus extends Source {
   chunks: number;
   lastSyncAt: number | null;
   lastError: string | null;
+  // A browser's meetings indexed from another browser's copy (stenograma/ingest.ts)
+  indexedElsewhere: number;
 }
 
+// A meeting's document id is stenograma:<source>:<session> (meetingDocumentId)
 export const listSources = (db: Db) => (db.prepare(`
   select s.id, s.kind, s.account, s.cloud_allowed as cloudAllowed, s.last_sync_at as lastSyncAt, s.last_error as lastError,
     (select count(*) from documents d where d.source_id = s.id) as documents,
-    (select count(*) from chunks c join documents d on d.id = c.document_id where d.source_id = s.id) as chunks
+    (select count(*) from chunks c join documents d on d.id = c.document_id where d.source_id = s.id) as chunks,
+    (select count(distinct r.session_id) from stenograma_rows r where s.kind = @browser and r.source_id = s.id
+      and not exists (select 1 from documents d where d.id = 'stenograma:' || s.id || ':' || r.session_id)) as indexedElsewhere
   from sources s order by s.id
-`).all() as (Omit<SourceStatus, 'cloudAllowed'> & { cloudAllowed: number })[]).map((row) => ({ ...row, cloudAllowed: Boolean(row.cloudAllowed) }));
+`).all({ browser: BROWSER_KIND }) as (Omit<SourceStatus, 'cloudAllowed'> & { cloudAllowed: number })[]).map((row) => ({ ...row, cloudAllowed: Boolean(row.cloudAllowed) }));
 
 // F8. Turning it off doesn't take back what already went to a cloud provider; turning it on queues nothing new, the
 // chunks' jobs are already waiting for a cloud embedding provider
@@ -61,8 +68,10 @@ export const setCloudAllowed = (db: Db, sourceId: number, allowed: boolean) => d
 export const markSynced = (db: Db, sourceId: number, error?: string) => db
   .prepare('update sources set last_sync_at = ?, last_error = ? where id = ?').run(Date.now(), error ?? null, sourceId);
 
-// Removes a source with all its documents (F7); its secrets go with it once sources have any (M2+)
-export const removeSource = (db: Db, sourceId: number) => db.transaction(() => {
+// Removes a source with all its documents (F7); its secrets go with it once sources have any (M2+). A meeting another
+// browser sent too is indexed from that browser's copy, for the embedding model
+export const removeSource = (db: Db, sourceId: number, embedModel: string | null) => db.transaction(() => {
+  reconcileSessions(db, sourceId, [], embedModel);
   (db.prepare('select id from documents where source_id = ?').all(sourceId) as { id: string }[])
     .forEach(({ id }) => deleteDocument(db, id));
   db.prepare('delete from sources where id = ?').run(sourceId);

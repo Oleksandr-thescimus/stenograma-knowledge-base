@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createBrowserSource } from '../../core/browsers.ts';
+import { createBrowserSource, renewBrowserToken } from '../../core/browsers.ts';
 import { getKbId } from '../../core/db.ts';
+import { findOrCreateSource } from '../../core/sources.ts';
 import { buildServer, stenogramaOpenUrl } from '../../core/server.ts';
 import { meetingDocumentId } from '../../core/stenograma/ingest.ts';
 import { API_VERSION } from '../../core/stenograma/types.ts';
@@ -107,6 +108,17 @@ describe('the API for the extension (N2)', () => {
     expect(response.json()).toEqual({ removed: 1 });
     expect(documentsOf(chrome.id)).toEqual([]);
     expect(documentsOf(firefox.id)).toHaveLength(1);
+  });
+
+  it('takes a browser\'s new token for the same source, and no longer its old one', async () => {
+    await call('POST', '/ingest', { token: chrome.token, body: { apiVersion: API_VERSION, bundles: [bundle('chrome-session', [message('A', 'Привіт')])] } });
+    const token = renewBrowserToken(db, chrome.id)!;
+
+    expect((await call('GET', '/status', { token: chrome.token })).statusCode).toBe(401);
+    expect((await call('GET', '/status', { token })).json().source).toEqual({ id: chrome.id, label: 'Chrome' });
+    expect((await call('GET', '/status', { token: firefox.token })).statusCode).toBe(200);
+    expect(documentsOf(chrome.id)).toHaveLength(1);
+    expect(renewBrowserToken(db, findOrCreateSource(db, 'stenograma-backup', 'data.json').id)).toBeUndefined();
   });
 
   it('serves /stenograma-open without a token, as a page holding no data', async () => {

@@ -4,18 +4,30 @@ import type { Source } from './sources.ts';
 
 // A paired browser is a Stenograma source with its own bearer token (step 6 of the plan's Sending, N2): Chrome's and
 // Firefox's histories stay apart, and a reconcile from one never deletes the other's meetings. The knowledge base keeps
-// only the token's hash; pasting the same token after reinstalling the extension continues the same source
+// only the token's hash; pasting the same token after reinstalling the extension continues the same source, and so does
+// a new token made for it when that one is lost (the old one stops working)
 
 export const BROWSER_KIND = 'stenograma-browser';
 
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 
+const newToken = () => `skb_${randomBytes(32).toString('base64url')}`;
+
 export const createBrowserSource = (db: Db, label: string): { source: Source, token: string } => {
-  const token = `skb_${randomBytes(32).toString('base64url')}`;
+  const token = newToken();
   const id = Number(db.prepare('insert into sources (kind, account, cloud_allowed, token_hash, created_at) values (?, ?, 1, ?, ?)')
     .run(BROWSER_KIND, label, hashToken(token), Date.now()).lastInsertRowid);
 
   return { source: { id, kind: BROWSER_KIND, account: label, cloudAllowed: true }, token };
+};
+
+// A new token for a paired browser, its old one no longer taken; undefined when the source isn't a browser
+export const renewBrowserToken = (db: Db, sourceId: number): string | undefined => {
+  const token = newToken();
+
+  return db.prepare('update sources set token_hash = ? where id = ? and kind = ?').run(hashToken(token), sourceId, BROWSER_KIND).changes
+    ? token
+    : undefined;
 };
 
 export const findBrowserByToken = (db: Db, token: string): Source | undefined => {

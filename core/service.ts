@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { prepareAnswer, streamAnswer } from './answer/answer.ts';
 import { rewriteQuestion } from './answer/rewrite.ts';
 import { summarizeTranscript } from './answer/summary.ts';
-import { BROWSER_KIND, createBrowserSource } from './browsers.ts';
+import { BROWSER_KIND, createBrowserSource, renewBrowserToken } from './browsers.ts';
 import {
   addTurn, chatExists, chatHistory, createChat, deleteChat, finishTurn, getChat, interruptRunningTurns, listChats,
   saveRequest, saveSources,
@@ -505,10 +505,24 @@ export const createKbService = (options: ServiceOptions) => {
       return { sourceId: source.id, token };
     },
 
+    renewBrowserToken: ({ sourceId }) => {
+      const token = renewBrowserToken(openedDb(), sourceId);
+
+      if (!token) {
+        throw new Error(`No browser source ${sourceId}`);
+      }
+
+      log(`made a new token for source ${sourceId}`);
+
+      return { token };
+    },
+
     removeSource: ({ sourceId }) => {
-      removeSource(openedDb(), sourceId);
+      removeSource(openedDb(), sourceId, embeddingModelId(loadSettings().embedding));
       log(`removed source ${sourceId}`);
       emitStatus();
+      // Another browser's copies of its meetings may have chunks to embed
+      runEmbedding();
 
       return null;
     },

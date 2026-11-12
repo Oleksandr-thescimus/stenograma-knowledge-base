@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Check, Copy } from 'lucide-react';
 import type { SourceInfo } from '../../../../core/protocol';
+import TokenField from '@/components/TokenField';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -20,14 +20,12 @@ interface AddBrowserDialogProps {
 const AddBrowserDialog = ({ open, onClose, backup }: AddBrowserDialogProps) => {
   const [label, setLabel] = useState('Chrome');
   const [token, setToken] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [backupRemoved, setBackupRemoved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const close = () => {
     setToken(null);
-    setCopied(false);
     setBackupRemoved(false);
     setError(null);
     onClose();
@@ -43,13 +41,6 @@ const AddBrowserDialog = ({ open, onClose, backup }: AddBrowserDialogProps) => {
       setError(errorMessage(reason));
     } finally {
       setBusy(false);
-    }
-  };
-
-  const copy = async () => {
-    if (token) {
-      await navigator.clipboard.writeText(token);
-      setCopied(true);
     }
   };
 
@@ -80,19 +71,7 @@ const AddBrowserDialog = ({ open, onClose, backup }: AddBrowserDialogProps) => {
         </DialogHeader>
         {token ? (
           <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>Token for {label.trim() || 'Browser'}</Label>
-              <div className="flex gap-2">
-                <Input readOnly value={token} className="font-mono text-xs" onFocus={(event) => event.target.select()} />
-                <Button variant="outline" size="icon" onClick={copy} aria-label="Copy the token">
-                  {copied ? <Check /> : <Copy />}
-                </Button>
-              </div>
-              <p className="text-sm text-muted-foreground">
-                In the extension&apos;s popup, open &quot;Local knowledge base&quot;, paste the token and turn it on. It&apos;s
-                shown only now: the knowledge base keeps only its hash.
-              </p>
-            </div>
+            <TokenField label={label.trim() || 'Browser'} token={token} />
             {backup && !backupRemoved && (
               <div className="space-y-2 rounded-lg border p-3">
                 <p className="text-sm">

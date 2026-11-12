@@ -39,6 +39,8 @@ export interface SourceInfo {
   chunks: number;
   lastSyncAt: number | null;
   lastError: string | null;
+  // A browser's meetings that another browser sent too, indexed from that browser's copy
+  indexedElsewhere: number;
 }
 
 export interface EmbeddingStatus {
@@ -223,6 +225,8 @@ export interface CoreMethods {
   cancelSummary: { params: { summaryId: string }, result: null };
   // The token is shown once: the knowledge base keeps only its hash
   addBrowser: { params: { label: string }, result: { sourceId: number, token: string } };
+  // A paired browser's new token, shown once too: the old one stops working, the source and its meetings stay
+  renewBrowserToken: { params: { sourceId: number }, result: { token: string } };
   removeSource: { params: { sourceId: number }, result: null };
   setCloudAllowed: { params: { sourceId: number, allowed: boolean }, result: null };
   // The embedding model is the one chosen, also while it's still being built

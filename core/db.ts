@@ -2,6 +2,7 @@ import { sep } from 'node:path';
 import Database from 'better-sqlite3';
 import { getLoadablePath } from 'sqlite-vec';
 import { rebuildVectorTable } from './embed/store.ts';
+import { keepOneCopy } from './stenograma/ingest.ts';
 
 export type Db = Database.Database;
 
@@ -130,6 +131,8 @@ const MIGRATIONS: (string | ((db: Db) => void))[] = [
     created_at integer not null
   );
   `,
+  // A meeting several browsers sent is indexed once (stenograma/ingest.ts): the copies indexed before are cut to one
+  keepOneCopy,
 ];
 
 // sqlite-vec's path points inside app.asar in a packaged app, which SQLite's dlopen can't read (M0)

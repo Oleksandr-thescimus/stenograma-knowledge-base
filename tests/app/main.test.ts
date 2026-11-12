@@ -76,6 +76,7 @@ describe('the renderer\'s calls', () => {
     expect(() => checkCall('removeSource', { sourceId: '1' })).toThrow();
     expect(() => checkCall('removeSource', { sourceId: -1 })).toThrow();
     expect(() => checkCall('removeSource', { sourceId: 1, all: true })).toThrow();
+    expect(() => checkCall('renewBrowserToken', { sourceId: 1, token: 'skb_chosen' })).toThrow();
     expect(() => checkCall('saveSettings', { ...DEFAULT_SETTINGS, server: { port: 22 } })).toThrow();
     expect(() => checkCall('saveSettings', { ...DEFAULT_SETTINGS, llm: { ...DEFAULT_SETTINGS.llm, ollamaUrl: 'not a url' } })).toThrow();
     expect(() => checkCall('openInStenograma', { sourceId: 1, sessionId: 's', startMs: 1, url: 'file:///etc/passwd' })).toThrow();

@@ -137,7 +137,7 @@ describe('summaries of meetings', () => {
 
     it('goes with the meeting when it\'s deleted', () => {
       keep();
-      reconcileSessions(db, sourceId, []);
+      reconcileSessions(db, sourceId, [], null);
 
       expect(db.prepare('select count(*) as n from summaries').get()).toEqual({ n: 0 });
     });
