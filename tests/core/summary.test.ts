@@ -1,12 +1,14 @@
 import { simulateReadableStream } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { meetingLanguage, splitIntoParts, summarizeTranscript, summaryInputBudget } from '../../core/answer/summary.ts';
+import {
+  meetingLanguage, splitIntoParts, summarizeTranscript, summaryInputBudget, type SummaryCall,
+} from '../../core/answer/summary.ts';
 import { DEFAULT_SETTINGS, type LlmSettings } from '../../core/settings.ts';
 import { findOrCreateSource } from '../../core/sources.ts';
 import { ingestBundles, meetingDocumentId, reconcileSessions } from '../../core/stenograma/ingest.ts';
 import { getMeeting, meetingLines } from '../../core/stenograma/meeting.ts';
-import { saveSummary, textHash } from '../../core/summaries.ts';
+import { averageSummaryMs, lastSummaryModel, saveSummary, textHash } from '../../core/summaries.ts';
 import { estimateTokens } from '../../core/tokens.ts';
 import { bundle, createTestDb, message, type Db } from './helpers.ts';
 
@@ -104,6 +106,18 @@ describe('summaries of meetings', () => {
     expect(final).not.toContain('Репліка');
   });
 
+  it('reports each model call with its time and tokens, the notes then the summary', async () => {
+    const model = summarizer(['- Підсумок.']);
+    const calls: SummaryCall[] = [];
+    await summarizeTranscript(model, GROQ, {
+      header: 'Meeting: Weekly', lines: transcript(400), onProgress: () => undefined, onText: () => undefined, onCall: (call) => calls.push(call),
+    });
+
+    expect(calls).toHaveLength(model.doGenerateCalls.length + 1);
+    expect(calls.slice(0, -1).every((call) => call.kind === 'notes')).toBe(true);
+    expect(calls.at(-1)).toMatchObject({ kind: 'summary', inputTokens: 1, outputTokens: 1, ms: expect.any(Number) });
+  });
+
   describe('kept with the meeting', () => {
     const SESSION = '2026/11/02 10:00:00 -> /abc-defg-hij';
     let db: Db;
@@ -133,6 +147,20 @@ describe('summaries of meetings', () => {
       ingestBundles(db, sourceId, [bundle(SESSION, [message('Olena', 'Почнемо з бюджету.', 1000), message('Oleh', 'Бюджет погодили, але з умовою.', 2000)])], null);
 
       expect(getMeeting(db, sourceId, SESSION)!.shortSummary).toMatchObject({ text: '- Погодили бюджет.', stale: true });
+    });
+
+    it('keeps its time, whose average of the model\'s last ones says how long the waiting ones take', () => {
+      const id = meetingDocumentId(sourceId, SESSION);
+
+      expect(averageSummaryMs(db, 'ollama qwen3.5:9b')).toBeNull();
+      keep();
+      expect(averageSummaryMs(db, 'ollama qwen3.5:9b')).toBeNull();
+
+      saveSummary(db, id, 'hash', 'ollama qwen3.5:9b', '- Погодили бюджет.', { durationMs: 60_000, calls: 3 }, 1000);
+      expect(db.prepare('select duration_ms as ms, calls from summaries').get()).toEqual({ ms: 60_000, calls: 3 });
+      expect(averageSummaryMs(db, 'ollama qwen3.5:9b')).toBe(60_000);
+      expect(averageSummaryMs(db, 'gemini gemini-2.5-flash')).toBeNull();
+      expect(lastSummaryModel(db)).toBe('ollama qwen3.5:9b');
     });
 
     it('goes with the meeting when it\'s deleted', () => {

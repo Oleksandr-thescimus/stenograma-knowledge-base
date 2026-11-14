@@ -1,7 +1,7 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import { findBrowserByToken } from './browsers.ts';
 import { getKbId, type Db } from './db.ts';
-import { markSynced, type Source } from './sources.ts';
+import { markSeen, markSynced, type Source } from './sources.ts';
 import { ingestBundles, reconcileSessions } from './stenograma/ingest.ts';
 import { API_VERSION, type SessionBundle } from './stenograma/types.ts';
 
@@ -23,6 +23,8 @@ export interface ServerOptions {
   embedModel: () => string | null;
   // After a push or a reconcile, e.g. to embed the new chunks
   onChange?: () => void;
+  // After a browser's call that changed nothing, as its status says when it was last seen
+  onSeen?: () => void;
   // Ids and counts only
   log?: (line: string) => void;
 }
@@ -58,7 +60,7 @@ const OPEN_PAGE = `<!doctype html>
 
 const refuse = (reply: FastifyReply, status: number, error: string) => reply.code(status).send({ error });
 
-export const buildServer = ({ db, port, embedModel, onChange, log = () => undefined }: ServerOptions) => {
+export const buildServer = ({ db, port, embedModel, onChange, onSeen, log = () => undefined }: ServerOptions) => {
   const server = Fastify({ logger: false, bodyLimit: BODY_LIMIT });
   const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
 
@@ -89,11 +91,17 @@ export const buildServer = ({ db, port, embedModel, onChange, log = () => undefi
     return undefined;
   });
 
-  server.get('/status', async (request) => ({
-    kbId: getKbId(db),
-    apiVersion: API_VERSION,
-    source: { id: request.browser!.id, label: request.browser!.account },
-  }));
+  // Each push starts with it, so it's when the browser was last seen, whether it had anything to send or not
+  server.get('/status', async (request) => {
+    markSeen(db, request.browser!.id);
+    onSeen?.();
+
+    return {
+      kbId: getKbId(db),
+      apiVersion: API_VERSION,
+      source: { id: request.browser!.id, label: request.browser!.account },
+    };
+  });
 
   server.post<{ Body: { apiVersion: number, bundles: SessionBundle[] } }>('/ingest', {
     schema: {

@@ -5,6 +5,7 @@ import { search } from '../../core/search.ts';
 import { findOrCreateSource, listSources, removeSource } from '../../core/sources.ts';
 import { saveSummary } from '../../core/summaries.ts';
 import { ingestBundles, keepOneCopy, meetingDocumentId, reconcileSessions } from '../../core/stenograma/ingest.ts';
+import { sourceMeetings } from '../../core/stenograma/meeting.ts';
 import { bundle, createFakeProvider, createTestDb, message, type Db } from './helpers.ts';
 
 const SESSION = '2026/11/02 10:00:00 -> /abc-defg-hij';
@@ -126,6 +127,25 @@ describe('a meeting that several browsers sent', () => {
     expect(indexedFrom()).toEqual([chrome]);
     expect((await search(db, 'бюджет')).hits.map((hit) => hit.documentId)).toEqual([meetingDocumentId(chrome, SESSION)]);
     expect(listSources(db).map((source) => source.indexedElsewhere)).toEqual([0, 1]);
+    expect(listSources(db).map((source) => source.copiesIn)).toEqual([[], [{ sourceId: chrome, meetings: 1 }]]);
+  });
+
+  it('lists each browser\'s meetings, a copy indexed in another as from that one, with the newest on its card', () => {
+    const own = '2026/11/02 12:00:00 -> /xyz-abcd-efg';
+    sendFromBoth();
+    ingestBundles(db, firefox, [bundle(own, lines(2))], null);
+    saveSummary(db, meetingDocumentId(firefox, own), 'hash', 'model', 'Погодили бюджет.');
+
+    expect(sourceMeetings(db, firefox).map(({ sessionId, indexedIn, summarized }) => ({ sessionId, indexedIn, summarized })))
+      .toEqual(expect.arrayContaining([
+        { sessionId: SESSION, indexedIn: chrome, summarized: false },
+        { sessionId: own, indexedIn: firefox, summarized: true },
+      ]));
+    expect(sourceMeetings(db, chrome).map((meeting) => meeting.sessionId)).toEqual([SESSION]);
+
+    const card = listSources(db).find((source) => source.id === firefox)!;
+    expect(card).toMatchObject({ meetings: 1, summarized: 1, inSeries: 0, latestMeeting: { title: expect.any(String), createdAt: expect.any(Number) } });
+    expect(card.firstMeetingAt).toBe(card.latestMeeting!.createdAt);
   });
 
   it('keeps the indexed copy for the same rows with their keys in another order', () => {

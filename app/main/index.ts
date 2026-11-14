@@ -25,8 +25,10 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
 let coreStatus: CoreStatus | null = null;
+// The setting as last read from the core; null until it runs
+let startAtLogin: boolean | null = null;
 
-const appStatus = (): AppStatus => ({ process: core.getStatus(), core: coreStatus, canStartAtLogin: app.isPackaged });
+const appStatus = (): AppStatus => ({ process: core.getStatus(), core: coreStatus });
 
 const sendToRenderer = (event: AppEvent) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -62,16 +64,61 @@ const showWindow = () => {
   mainWindow.focus();
 };
 
-const updateTray = (status: ProcessStatus) => {
+// The background AI work (images, summaries) takes the GPU: it's paused from the tray too, without opening the window
+const imagesItem = (): Electron.MenuItemConstructorOptions[] => {
+  const attachments = coreStatus?.attachments;
+
+  if (!attachments || core.getStatus().state !== 'running') {
+    return [];
+  }
+
+  const call = (method: 'pauseBackground' | 'resumeBackground', params: { minutes: number | null } | Record<string, never>) => core
+    .invoke(method, params as never).catch((error: unknown) => console.error(`${method}: ${(error as Error).message}`));
+
+  return attachments.paused
+    ? [{ label: 'Resume the background AI work', click: () => call('resumeBackground', {}) }]
+    : [{ label: 'Pause the background AI work for an hour', click: () => call('pauseBackground', { minutes: 60 }) }];
+};
+
+// Starting at login is set in the tray, where the app stays. Only a packaged app starts at login: the dev build's
+// executable is Electron's own
+const startAtLoginItem = (): Electron.MenuItemConstructorOptions => ({
+  label: app.isPackaged ? 'Start at login' : 'Start at login (the installed app only)',
+  type: 'checkbox',
+  checked: Boolean(startAtLogin),
+  enabled: app.isPackaged && startAtLogin !== null && core.getStatus().state === 'running',
+  click: () => {
+    core.invoke('getSettings', {})
+      .then((settings) => core.invoke('saveSettings', { ...settings, app: { startAtLogin: !settings.app.startAtLogin } }))
+      .then((saved) => applyStartAtLogin(saved.app.startAtLogin))
+      .catch((error: unknown) => console.error(`Autostart: ${(error as Error).message}`))
+      .finally(() => updateTray());
+  },
+});
+
+let trayKey = '';
+
+const updateTray = (status: ProcessStatus = core.getStatus()) => {
   if (!tray) {
     return;
   }
 
+  // Built again only when it changes: the core's status comes often
+  const key = JSON.stringify([describeProcess(status), coreStatus?.attachments.paused, status.state, startAtLogin]);
+
+  if (key === trayKey) {
+    return;
+  }
+
+  trayKey = key;
   tray.setToolTip(`Stenograma KB: ${describeProcess(status).toLowerCase()}`);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open Stenograma KB', click: showWindow },
     { type: 'separator' },
     { label: describeProcess(status), enabled: false },
+    ...imagesItem(),
+    { type: 'separator' },
+    startAtLoginItem(),
     { type: 'separator' },
     { label: 'Quit', click: () => app.quit() },
   ]));
@@ -83,6 +130,7 @@ const core = createCoreSupervisor({
     if (event.type === 'status') {
       coreStatus = event.status;
       sendToRenderer({ type: 'status', status: appStatus() });
+      updateTray();
     } else {
       sendToRenderer(event);
     }
@@ -96,7 +144,10 @@ const core = createCoreSupervisor({
     // The settings are the core's: the main process imports nothing of it, as the core's process is a bundle of its own
     if (status.state === 'running') {
       core.invoke('getSettings', {})
-        .then((settings) => applyStartAtLogin(settings.app.startAtLogin))
+        .then((settings) => {
+          applyStartAtLogin(settings.app.startAtLogin);
+          updateTray();
+        })
         .catch((error: unknown) => console.error(`Autostart: ${(error as Error).message}`));
     }
 
@@ -105,8 +156,9 @@ const core = createCoreSupervisor({
   },
 });
 
-// Only a packaged app starts at login: the dev build's executable is Electron's own
 const applyStartAtLogin = (enabled: boolean) => {
+  startAtLogin = enabled;
+
   if (app.isPackaged) {
     syncAutostart(enabled, process.env.APPIMAGE ?? process.execPath);
   }
@@ -188,11 +240,15 @@ ipcMain.handle('kb:call', async (event, method: unknown, params: unknown) => {
       openExternally(await core.invoke('stenogramaLink', call.params));
 
       return null;
-    case 'saveSettings': {
-      const saved = await core.invoke('saveSettings', call.params);
-      applyStartAtLogin(saved.app.startAtLogin);
+    case 'openInChat':
+      openExternally(await core.invoke('chatLink', call.params));
 
-      return saved;
+      return null;
+    case 'saveSettings': {
+      // Starting at login is the tray's: the Settings page's copy may be older than a change there
+      const current = await core.invoke('getSettings', {});
+
+      return core.invoke('saveSettings', { ...call.params, app: current.app });
     }
     default:
       return core.invoke(call.method as keyof CoreMethods, call.params as never);

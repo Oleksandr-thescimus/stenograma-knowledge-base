@@ -70,6 +70,14 @@ describe('the API for the extension (N2)', () => {
     expect((await call('GET', '/status', { token: firefox.token, origin: 'moz-extension://0b5d-4f3c' })).statusCode).toBe(200);
   });
 
+  it('marks the browser as seen at each check, a push or not, and as synced only by a push', async () => {
+    const times = () => db.prepare('select last_seen_at as seen, last_sync_at as synced from sources where id = ?').get(firefox.id) as { seen: number | null, synced: number | null };
+
+    expect(times()).toEqual({ seen: null, synced: null });
+    await call('GET', '/status', { token: firefox.token });
+    expect(times()).toEqual({ seen: expect.any(Number), synced: null });
+  });
+
   it('tells the knowledge base\'s id, the API version and the browser\'s source', async () => {
     expect((await call('GET', '/status', { token: firefox.token })).json()).toEqual({
       kbId: getKbId(db), apiVersion: API_VERSION, source: { id: firefox.id, label: 'Firefox' },

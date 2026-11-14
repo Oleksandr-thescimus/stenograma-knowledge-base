@@ -1,5 +1,5 @@
 import type { Db } from '../db.ts';
-import type { MeetingView } from '../protocol.ts';
+import type { MeetingView, SourceMeeting } from '../protocol.ts';
 import { BROWSER_KIND } from '../browsers.ts';
 import { formatDay } from '../format.ts';
 import { getSummary, textHash } from '../summaries.ts';
@@ -59,3 +59,16 @@ export const getIndexedVersion = (db: Db, sourceId: number, sessionId: string) =
 
   return session ? pickText(session, transcripts).version : null;
 };
+
+// A browser's or a backup's meetings, the newest first, for the list in Sources: each indexed once, from this source's
+// copy or another browser's (indexedIn)
+export const sourceMeetings = (db: Db, sourceId: number): SourceMeeting[] => (db.prepare(`
+  select r.session_id as sessionId, d.source_id as indexedIn, d.title, d.created_at as createdAt, ms.name as series,
+    m.document_id is not null as summarized
+  from (select distinct session_id from stenograma_rows where source_id = @sourceId) r
+  join documents d on d.id in (select 'stenograma:' || s.id || ':' || r.session_id from sources s where s.kind like 'stenograma%')
+  left join meeting_series ms on ms.id = d.series_id
+  left join summaries m on m.document_id = d.id
+  order by d.created_at desc
+`).all({ sourceId }) as (Omit<SourceMeeting, 'summarized'> & { summarized: number })[])
+  .map((row) => ({ ...row, summarized: Boolean(row.summarized) }));

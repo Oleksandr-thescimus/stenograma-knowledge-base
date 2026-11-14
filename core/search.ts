@@ -23,6 +23,10 @@ export interface SearchFilters {
   from?: number;
   to?: number;
   person?: string;
+  // Chat rooms: their documents only
+  rooms?: { sourceId: number, roomId: string }[];
+  // Meeting series: their meetings' documents only
+  seriesIds?: number[];
 }
 
 export interface SearchHit {
@@ -40,6 +44,8 @@ export interface SearchHit {
   madeByAi: boolean;
   participants: string[];
   score: number;
+  // For the answer, e.g. how many reactions a message in it has
+  note?: string;
 }
 
 export interface SearchResult {
@@ -60,7 +66,13 @@ export const fuseRankings = (rankings: { ids: number[], weight: number }[]) => {
   return scores;
 };
 
-const hasFilters = (filters: SearchFilters) => Boolean(filters.sourceKind) || filters.from !== undefined || filters.to !== undefined;
+const hasFilters = (filters: SearchFilters) => Boolean(filters.sourceKind) || filters.from !== undefined || filters.to !== undefined
+  || Boolean(filters.rooms) || Boolean(filters.seriesIds);
+
+const roomsParam = (filters: SearchFilters) => (filters.rooms ? JSON.stringify(filters.rooms.map((room) => `${room.sourceId}:${room.roomId}`)) : null);
+const seriesParam = (filters: SearchFilters) => (filters.seriesIds ? JSON.stringify(filters.seriesIds) : null);
+const IN_ROOMS = `(@rooms is null or (d.source_id || ':' || d.thread_id) in (select value from json_each(@rooms)))
+  and (@series is null or d.series_id in (select value from json_each(@series)))`;
 
 // With filters, BM25 first takes this many best matches without joins, and filters only those
 const FTS_CANDIDATES = 1000;
@@ -71,6 +83,7 @@ const FILTERED_FTS = `
   where chunks_fts match @match
     and (@kind is null or s.kind = @kind or s.kind like @kind || '-%')
     and (@from is null or d.created_at >= @from) and (@to is null or d.created_at < @to)
+    and ${IN_ROOMS}
   order by bm25(chunks_fts) limit @depth`;
 
 const searchFts = (db: Db, query: string, filters: SearchFilters) => {
@@ -89,13 +102,16 @@ const searchFts = (db: Db, query: string, filters: SearchFilters) => {
 
   // A common word matches tens of thousands of chunks, and joining each of them took ~100 ms at 100k chunks. So the
   // filters go over the best matches first; only when they leave too few of many matches, over all of them
-  const params = { kind: filters.sourceKind ?? null, from: filters.from ?? null, to: filters.to ?? null };
+  const params = {
+    kind: filters.sourceKind ?? null, from: filters.from ?? null, to: filters.to ?? null, rooms: roomsParam(filters), series: seriesParam(filters),
+  };
   const candidates = ranked(FTS_CANDIDATES);
   const kept = new Set(candidates.length ? (db.prepare(`
     select c.id from chunks c join documents d on d.id = c.document_id join sources s on s.id = d.source_id
     where c.id in (${candidates.map(() => '?').join(',')})
       and (@kind is null or s.kind = @kind or s.kind like @kind || '-%')
       and (@from is null or d.created_at >= @from) and (@to is null or d.created_at < @to)
+      and ${IN_ROOMS}
   `).all(...candidates, params) as { id: number }[]).map((row) => row.id) : []);
   const filtered = candidates.filter((id) => kept.has(id));
 
@@ -130,8 +146,22 @@ const rescore = (db: Db, model: string, ids: number[], query: Float32Array) => {
   return scored.sort((a, b) => b.score - a.score).slice(0, DEPTH).map((row) => row.id);
 };
 
+// A room's chunks are few enough to rank all by their float vectors: the bit vectors' nearest of every source would hold
+// few of them
+const ROOM_CHUNKS = 50_000;
+
 // Bit vectors find the candidates by Hamming distance, with the filters inside the search; the float vectors rank them
 const searchVectors = (db: Db, model: string, vector: Float32Array, filters: SearchFilters) => {
+  if (filters.rooms || filters.seriesIds) {
+    const inRooms = (db.prepare(`
+      select c.id from chunks c join documents d on d.id = c.document_id
+      where ${IN_ROOMS} and (@from is null or d.created_at >= @from) and (@to is null or d.created_at < @to) limit @cap
+    `).all({ rooms: roomsParam(filters), series: seriesParam(filters), from: filters.from ?? null, to: filters.to ?? null, cap: ROOM_CHUNKS }) as
+      { id: number }[]).map((row) => row.id);
+
+    return rescore(db, model, inRooms, vector);
+  }
+
   const conditions = ['embedding match vec_quantize_binary(?)', 'k = ?'];
   // vec0 takes integers only, and better-sqlite3 binds numbers as REAL
   const params: unknown[] = [Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength), BigInt(VECTOR_CANDIDATES)];
@@ -173,8 +203,16 @@ const loadHits = (db: Db, ids: number[]) => {
   return new Map(rows.map((row) => [row.chunkId, { ...row, madeByAi: Boolean(row.madeByAi), participants: JSON.parse(row.participants) as string[] }]));
 };
 
-// Speakers of a transcript chunk's "Name: text" lines
-const speakersOf = (text: string) => new Set([...text.matchAll(/^([^:\n]{1,60}): /gm)].map((match) => match[1]));
+// Chunks found another way (the messages with the most reactions), as hits in their order
+export const hitsOf = (db: Db, found: { chunkId: number, score: number, note?: string }[]): SearchHit[] => {
+  const loaded = loadHits(db, found.map((item) => item.chunkId));
+
+  return found.filter((item) => loaded.has(item.chunkId))
+    .map((item) => ({ ...loaded.get(item.chunkId)!, score: item.score, ...(item.note && { note: item.note }) }));
+};
+
+// Speakers of a transcript or chat chunk's "Name: text" lines; a chat's quoted messages ("> Name: text") aren't theirs
+const speakersOf = (text: string) => new Set([...text.matchAll(/^(?!> )([^:\n]{1,60}): /gm)].map((match) => match[1]));
 
 // Hybrid search (F5): BM25 and vectors with the same filters, fused, then a person's chunks raised
 export const search = async (

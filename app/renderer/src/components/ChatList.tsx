@@ -19,7 +19,7 @@ const ChatList = ({ chats, onChoose }: { chats: Chats, onChoose: (chatId: number
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="mt-6 mb-1 flex items-center justify-between px-2">
         <h2 className="text-xs font-medium text-muted-foreground">Chats</h2>
-        <Button size="icon-xs" variant="ghost" onClick={() => onChoose(null)} disabled={chats.answering} aria-label="New chat">
+        <Button size="icon-xs" variant="ghost" onClick={() => onChoose(null)} disabled={chats.answering} aria-label="New chat" title="New chat (Ctrl+N)">
           <Plus />
         </Button>
       </div>

@@ -1,18 +1,18 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { AlertTriangle, Filter, Loader2, MessageSquarePlus, SendHorizontal, Square, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AlertTriangle, Cloud, Loader2, Monitor } from 'lucide-react';
 import { cn } from 'cn';
-import type { AppEvent, AskPart, CitedSource, SavedTurn, SearchFilters } from '../../../../core/protocol';
+import type { AppEvent, AskPart, CitedSource, LlmSettings, ModelChoice, SavedTurn } from '../../../../core/protocol';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Textarea } from '@/components/ui/textarea';
+import Composer, { Chip } from '@/components/Composer';
 import MarkdownText from '@/components/MarkdownText';
+import ConversationDialog from '@/components/ConversationDialog';
 import MeetingDialog from '@/components/MeetingDialog';
+import ModelPicker from '@/components/ModelPicker';
 import type { Chats } from '@/lib/chats';
 import { citedNumbers } from '@/lib/citations';
-import { formatDay, formatMoment } from '@/lib/format';
+import { NO_FILTERS, requestChips, toFilters, type FilterFields, type Without } from '@/lib/filters';
+import { formatChunkStart, formatDay, isChatDocument } from '@/lib/format';
 import { errorMessage, useAppStatus, useKbEvents } from '@/lib/kb';
 
 // The chat (F6): streamed answers with [n] citations, filters set by hand, and the meeting view at the cited moment.
@@ -32,14 +32,6 @@ interface Turn {
   startedAt: number;
 }
 
-interface FilterFields {
-  from: string;
-  to: string;
-  person: string;
-  sourceKind: string;
-}
-
-const NO_FILTERS: FilterFields = { from: '', to: '', person: '', sourceKind: 'all' };
 const EXAMPLES = [
   'Що ми вирішили щодо релізу минулого тижня?',
   'What did Olena say about the budget?',
@@ -59,21 +51,6 @@ const fromSaved = (turn: SavedTurn): Turn => ({
   error: turn.state === 'running' ? 'Still being answered: open the chat again for the answer.' : turn.error ?? undefined,
   startedAt: turn.createdAt,
 });
-
-const dayStart = (day: string) => new Date(`${day}T00:00:00`).getTime();
-
-// Days from the date fields: from the start of `from` to the end of `to`
-const toFilters = (fields: FilterFields): SearchFilters => {
-  const next = fields.to ? new Date(`${fields.to}T00:00:00`) : null;
-  next?.setDate(next.getDate() + 1);
-
-  return {
-    ...(fields.from && { from: dayStart(fields.from) }),
-    ...(next && { to: next.getTime() }),
-    ...(fields.person.trim() && { person: fields.person.trim() }),
-    ...(fields.sourceKind !== 'all' && { sourceKind: fields.sourceKind }),
-  };
-};
 
 const applyPart = (turn: Turn, part: AskPart): Turn => {
   switch (part.kind) {
@@ -107,12 +84,6 @@ const useNow = (active: boolean) => {
   return now;
 };
 
-const describeRequest = (request: RequestPart) => [
-  request.from !== undefined && `from ${formatDay(request.from)}`,
-  request.to !== undefined && `to ${formatDay(request.to - 1)}`,
-  request.person && `person: ${request.person}`,
-].filter(Boolean).join(' · ');
-
 // A removed source is still listed, as its answer cites it, but no longer opens
 const SourceRow = ({ source, onOpen, dimmed }: { source: CitedSource, onOpen: (source: CitedSource) => void, dimmed?: boolean }) => (
   <button
@@ -128,14 +99,31 @@ const SourceRow = ({ source, onOpen, dimmed }: { source: CitedSource, onOpen: (s
     <span className="min-w-0 truncate">{source.title}</span>
     <span className="shrink-0 text-xs text-muted-foreground">
       {formatDay(source.createdAt)}
-      {formatMoment(source.startMs)}
+      {formatChunkStart(source)}
     </span>
     {source.madeByAi && <Badge variant="outline" className="shrink-0">made by AI</Badge>}
     {source.removed && <Badge variant="outline" className="shrink-0">removed</Badge>}
   </button>
 );
 
-const TurnView = ({ turn, now, onOpen }: { turn: Turn, now: number, onOpen: (source: CitedSource) => void }) => {
+// The models to ask again with, under a finished answer
+interface AskAgain {
+  models: ModelChoice[];
+  ollamaUrl: string;
+  disabled: boolean;
+  onAsk: (question: string, llm: LlmSettings) => void;
+  // Without a filter the rewrite took from the question
+  onAskWithout: (question: string, without: Without) => void;
+}
+
+interface TurnViewProps {
+  turn: Turn;
+  now: number;
+  onOpen: (source: CitedSource) => void;
+  askAgain: AskAgain | null;
+}
+
+const TurnView = ({ turn, now, onOpen, askAgain }: TurnViewProps) => {
   const sources = turn.sources?.sources ?? [];
   const cited = citedNumbers(turn.answer);
   // A removed source's [n] stays plain text
@@ -154,10 +142,19 @@ const TurnView = ({ turn, now, onOpen }: { turn: Turn, now: number, onOpen: (sou
       <div className="max-w-[80%] self-end rounded-2xl bg-primary/15 px-4 py-2 whitespace-pre-wrap">{turn.question}</div>
       <div className="rounded-2xl bg-bubble px-4 py-3">
         {turn.request && (
-          <p className="mb-2 text-xs text-muted-foreground">
-            Searched for: {turn.request.query}
-            {describeRequest(turn.request) && ` · ${describeRequest(turn.request)}`}
-          </p>
+          <div className="mb-2 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+            <span className="mr-1">Searched for: {turn.request.query}</span>
+            {/* Taken from the question: a made-up one goes with ✕, which asks again without it */}
+            {requestChips(turn.request).map((chip) => (
+              <Chip
+                key={chip.key}
+                label={chip.label}
+                title="Taken from the question: remove it to ask again without it"
+                disabled={!askAgain || askAgain.disabled}
+                onRemove={() => askAgain?.onAskWithout(turn.question, chip.key)}
+              />
+            ))}
+          </div>
         )}
         {turn.state === 'searching' && (
           <p className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -189,6 +186,28 @@ const TurnView = ({ turn, now, onOpen }: { turn: Turn, now: number, onOpen: (sou
           </p>
         )}
         {turn.error && <p className="text-sm text-destructive">{turn.error}</p>}
+        {turn.state === 'done' && turn.sources && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            {/* On this computer, or in the cloud */}
+            <span className="flex items-center gap-1">
+              Answered by
+              {turn.sources.local ? <Monitor className="size-3.5" /> : <Cloud className="size-3.5" />}
+              {turn.sources.llm.slice(turn.sources.llm.indexOf(' ') + 1)}
+            </span>
+            {askAgain && (
+              <ModelPicker
+                models={askAgain.models}
+                value={null}
+                ollamaUrl={askAgain.ollamaUrl}
+                onChange={(llm) => askAgain.onAsk(turn.question, llm)}
+                placeholder="Ask again with…"
+                except={turn.sources.llm.replace(' ', '|')}
+                disabled={askAgain.disabled}
+                ghost
+              />
+            )}
+          </div>
+        )}
         {sources.length > 0 && turn.state !== 'searching' && (
           <div className="mt-3 border-t pt-2">
             {sources.filter((source) => cited.has(source.n)).map((source) => <SourceRow key={source.n} source={source} onOpen={onOpen} />)}
@@ -211,13 +230,16 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [question, setQuestion] = useState('');
   const [fields, setFields] = useState<FilterFields>(NO_FILTERS);
-  const [showFilters, setShowFilters] = useState(false);
   const [opened, setOpened] = useState<CitedSource | null>(null);
+  // The chat's model; null for the settings' one
+  const [chatLlm, setChatLlm] = useState<LlmSettings | null>(null);
+  const [defaultLlm, setDefaultLlm] = useState<LlmSettings | null>(null);
+  const [models, setModels] = useState<ModelChoice[]>([]);
+  const [seriesNames, setSeriesNames] = useState<string[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const running = turns.some(isRunning);
   const now = useNow(running);
   const coreRunning = status?.process.state === 'running';
-  const activeFilters = Object.keys(toFilters(fields)).length;
 
   const onEvent = useCallback((event: AppEvent) => {
     if (event.type === 'ask') {
@@ -227,6 +249,26 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
 
   useKbEvents(onEvent);
 
+  // The settings' model, and the models to choose from: listed again after the list closes and when the window comes
+  // back, as models are installed elsewhere. Kept as they were when the same, not to draw the list again
+  const listModels = useCallback(() => {
+    const same = <T, >(next: T) => (current: T) => (JSON.stringify(current) === JSON.stringify(next) ? current : next);
+    window.kb.invoke('getSettings', {}).then((settings) => setDefaultLlm(same<LlmSettings | null>(settings.llm))).catch(() => undefined);
+    window.kb.invoke('chatModels', {}).then((found) => setModels(same(found))).catch(() => undefined);
+    window.kb.invoke('meetingSeries', {}).then(({ series }) => setSeriesNames(same(series.map(({ name }) => name)))).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!coreRunning) {
+      return undefined;
+    }
+
+    listModels();
+    window.addEventListener('focus', listModels);
+
+    return () => window.removeEventListener('focus', listModels);
+  }, [coreRunning, listModels]);
+
   const { chosen, choose, setAnswering, started, refresh } = chats;
 
   // A chat chosen in the sidebar, or a new one
@@ -235,6 +277,7 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
 
     if (chosen.chatId === null) {
       setTurns([]);
+      setChatLlm(null);
 
       return undefined;
     }
@@ -247,6 +290,7 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
 
       if (chat) {
         setTurns(chat.turns.map(fromSaved));
+        setChatLlm(chat.llm);
       } else {
         choose(null);
         refresh();
@@ -267,13 +311,27 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
     setAnswering(running);
   }, [running, setAnswering]);
 
+  // Ctrl+N starts a new chat, as the sidebar's +
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n' && !running) {
+        event.preventDefault();
+        choose(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+
+    return () => window.removeEventListener('keydown', onKey);
+  }, [choose, running]);
+
   const lastAnswerLength = turns.at(-1)?.answer.length;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [turns.length, lastAnswerLength]);
 
-  const send = async (text = question) => {
+  // A question goes to the chat's model; asked again with another one, that one is the chat's from then on
+  const send = async (text = question, llm = chatLlm, without: Without[] = []) => {
     const asked = text.trim();
 
     if (!asked || running || !coreRunning) {
@@ -282,10 +340,14 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
 
     const askId = crypto.randomUUID();
     setTurns((current) => [...current, { askId, question: asked, answer: '', state: 'searching', startedAt: Date.now() }]);
-    setQuestion('');
+    setChatLlm(llm);
+
+    if (text === question) {
+      setQuestion('');
+    }
 
     try {
-      const { chatId } = await window.kb.invoke('ask', { askId, chatId: chats.chatId, question: asked, filters: toFilters(fields) });
+      const { chatId } = await window.kb.invoke('ask', { askId, chatId: chats.chatId, question: asked, filters: toFilters(fields), llm, without });
       started(chatId);
       refresh();
     } catch (error) {
@@ -294,15 +356,6 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
   };
 
   const stop = () => turns.filter(isRunning).forEach((turn) => window.kb.invoke('cancelAsk', { askId: turn.askId }));
-
-  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-      event.preventDefault();
-      send();
-    }
-  };
-
-  const setField = (name: keyof FilterFields) => (value: string) => setFields((current) => ({ ...current, [name]: value }));
 
   return (
     <div className="flex h-full flex-col">
@@ -322,84 +375,45 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
               </div>
             </div>
           )}
-          {turns.map((turn) => <TurnView key={turn.askId} turn={turn} now={now} onOpen={setOpened} />)}
+          {turns.map((turn) => (
+            <TurnView
+              key={turn.askId}
+              turn={turn}
+              now={now}
+              onOpen={setOpened}
+              askAgain={defaultLlm ? {
+                models,
+                ollamaUrl: defaultLlm.ollamaUrl,
+                disabled: running || !coreRunning,
+                onAsk: (asked, llm) => send(asked, llm),
+                onAskWithout: (asked, without) => send(asked, chatLlm, [without]),
+              } : null}
+            />
+          ))}
           <div ref={bottomRef} />
         </div>
       </div>
-      <div className="border-t bg-background">
-        <div className="mx-auto max-w-3xl p-4">
-          {showFilters && (
-            <div className="mb-3 grid grid-cols-2 gap-3 rounded-lg border p-3 md:grid-cols-4">
-              <div className="space-y-1">
-                <Label htmlFor="filter-from">From</Label>
-                <Input id="filter-from" type="date" value={fields.from} onChange={(event) => setField('from')(event.target.value)} />
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="filter-to">To</Label>
-                <Input id="filter-to" type="date" value={fields.to} onChange={(event) => setField('to')(event.target.value)} />
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="filter-person">Person</Label>
-                <Input id="filter-person" placeholder="Olena" value={fields.person} onChange={(event) => setField('person')(event.target.value)} />
-              </div>
-              <div className="space-y-1">
-                <Label>Source</Label>
-                <Select value={fields.sourceKind} onValueChange={setField('sourceKind')}>
-                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All sources</SelectItem>
-                    <SelectItem value="stenograma">Meetings</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <p className="col-span-full text-xs text-muted-foreground">
-                Set here, they win over the dates and the person taken from the question.
-              </p>
-            </div>
-          )}
-          <div className="flex items-end gap-2">
-            <Textarea
-              value={question}
-              onChange={(event) => setQuestion(event.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={coreRunning ? 'Ask a question (Enter sends, Shift+Enter starts a new line)' : 'The knowledge base isn\'t running'}
-              disabled={!coreRunning}
-              rows={2}
-              className="max-h-48 min-h-[3.5rem] resize-none"
-            />
-            <div className="flex flex-col gap-1">
-              {running ? (
-                <Button size="icon" variant="secondary" onClick={stop} aria-label="Stop">
-                  <Square />
-                </Button>
-              ) : (
-                <Button size="icon" onClick={() => send()} disabled={!question.trim() || !coreRunning} aria-label="Send">
-                  <SendHorizontal />
-                </Button>
-              )}
-            </div>
-          </div>
-          <div className="mt-2 flex items-center gap-2">
-            <Button size="xs" variant={showFilters || activeFilters ? 'secondary' : 'ghost'} onClick={() => setShowFilters(!showFilters)}>
-              <Filter />
-              Filters
-              {activeFilters > 0 && ` (${activeFilters})`}
-            </Button>
-            {activeFilters > 0 && (
-              <Button size="xs" variant="ghost" onClick={() => setFields(NO_FILTERS)}>
-                <X />
-                Clear
-              </Button>
-            )}
-            <div className="flex-1" />
-            <Button size="xs" variant="ghost" onClick={() => choose(null)} disabled={running || !turns.length}>
-              <MessageSquarePlus />
-              New chat
-            </Button>
-          </div>
+      <div className="bg-background">
+        <div className="mx-auto max-w-3xl px-4 pb-4">
+          <Composer
+            question={question}
+            onQuestion={setQuestion}
+            onSend={() => send()}
+            onStop={stop}
+            running={running}
+            coreRunning={coreRunning}
+            fields={fields}
+            onFields={setFields}
+            models={models}
+            model={chatLlm ?? defaultLlm}
+            onModel={setChatLlm}
+            onModelsClosed={listModels}
+            seriesNames={seriesNames}
+          />
         </div>
       </div>
-      <MeetingDialog source={opened} onClose={() => setOpened(null)} />
+      <MeetingDialog source={opened && !isChatDocument(opened.documentKind) ? opened : null} onClose={() => setOpened(null)} />
+      <ConversationDialog source={opened && isChatDocument(opened.documentKind) ? opened : null} onClose={() => setOpened(null)} />
     </div>
   );
 };

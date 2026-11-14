@@ -133,6 +133,108 @@ const MIGRATIONS: (string | ((db: Db) => void))[] = [
   `,
   // A meeting several browsers sent is indexed once (stenograma/ingest.ts): the copies indexed before are cut to one
   keepOneCopy,
+  // Messengers (F3, chat/store.ts): the rooms synced, and their messages as the chunker reads them, so a room is indexed
+  // again without a sync
+  `
+  create table chat_rooms (
+    source_id integer not null references sources(id) on delete cascade,
+    room_id text not null,
+    -- channel, group, direct
+    type text not null,
+    -- The name in the room's links, and the one people see
+    name text not null,
+    title text not null,
+    -- The connector's cursors (JSON), null before the room's first sync
+    cursor text,
+    primary key (source_id, room_id)
+  );
+
+  create table chat_messages (
+    source_id integer not null references sources(id) on delete cascade,
+    room_id text not null,
+    message_id text not null,
+    -- A reply's thread: the id of the thread's first message
+    thread_id text,
+    ts integer not null,
+    -- chat/types.ts ChatMessage
+    json text not null,
+    primary key (source_id, message_id)
+  );
+  create index chat_messages_room on chat_messages(source_id, room_id, ts);
+  create index chat_messages_thread on chat_messages(source_id, thread_id) where thread_id is not null;
+  `,
+  // A room's members (JSON names), read once a day: in a small room they're its documents' participants
+  `
+  alter table chat_rooms add column members text not null default '[]';
+  alter table chat_rooms add column members_at integer;
+  `,
+  // The files of messages whose content is read (chat/attachments.ts): an image's text and what it shows, by a vision
+  // model, and a document's text. The rooms are read whole again, for the files of the messages kept before
+  `
+  create table chat_attachments (
+    source_id integer not null references sources(id) on delete cascade,
+    room_id text not null,
+    message_id text not null,
+    file_id text not null,
+    name text not null,
+    type text,
+    size integer,
+    -- Where the messenger serves it, from its server's address
+    path text not null,
+    -- image, document
+    kind text not null,
+    ts integer not null,
+    -- pending, done, failed, skipped
+    state text not null default 'pending',
+    text text,
+    description text,
+    model text,
+    error text,
+    attempts integer not null default 0,
+    primary key (source_id, file_id)
+  );
+  create index chat_attachments_state on chat_attachments(state, ts);
+  create index chat_attachments_message on chat_attachments(source_id, message_id);
+  update chat_rooms set cursor = null;
+  `,
+  // A messenger's people, by username, from messages' authors and rooms' members: a reaction names its people by
+  // username. The rooms are read whole again, for the reactions of the messages kept before
+  `
+  create table chat_users (
+    source_id integer not null references sources(id) on delete cascade,
+    username text not null,
+    name text not null,
+    primary key (source_id, username)
+  );
+  update chat_rooms set cursor = null;
+  `,
+  // A chat's model (JSON LlmSettings), the one its last question went to; null for the settings' one
+  `
+  alter table chats add column llm text;
+  `,
+  // Meeting series (stenograma/series.ts): a name, and the meetings it has by their Meet code, or a weekday and time.
+  // A meeting's documents say their series, for the questions about one
+  `
+  create table meeting_series (
+    id integer primary key,
+    name text not null unique,
+    -- JSON SeriesMatcher[]
+    matchers text not null default '[]',
+    created_at integer not null
+  );
+  alter table documents add column series_id integer;
+  create index documents_series on documents(series_id) where series_id is not null;
+  `,
+  // How long a short summary took and in how many calls, for the time the waiting ones will take; null for those made
+  // before
+  `
+  alter table summaries add column duration_ms integer;
+  alter table summaries add column calls integer;
+  `,
+  // When a browser last called the API, a push or only a check that found nothing new
+  `
+  alter table sources add column last_seen_at integer;
+  `,
 ];
 
 // sqlite-vec's path points inside app.asar in a packaged app, which SQLite's dlopen can't read (M0)

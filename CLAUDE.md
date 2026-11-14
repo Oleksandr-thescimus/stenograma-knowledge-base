@@ -10,8 +10,9 @@ runs it. [docs/PLAN.md](docs/PLAN.md) is the plan: requirements, architecture, m
 
 M0 (spikes) is done but for the checks that need the user; M1 (meetings in the terminal, `yarn kb`) is done. M2 (the
 extension pushes meetings) works with Chrome; Firefox and the extension's store release remain. M3 (the app: chat,
-sources, settings, tray) is built; its checks by hand remain (the plan's Decisions of 2026-11-03). M3.5 (the app, day
-to day) comes next, before M4.
+sources, settings, tray) is built; its checks by hand remain (the plan's Decisions of 2026-11-03). Rocket.Chat, the
+first connector, went ahead of M3.5 (Decisions of 2026-11-12); its check on a real server and golden set remain. M3.5
+(the app, day to day) comes next, before M4.
 
 The extension is another repo, [stenograma](https://github.com/Oleksandr-thescimus/stenograma), checked out next to
 this one as `../stenograma`. The two meet only at the HTTP API, with no submodule or shared package. Open both with
@@ -31,7 +32,7 @@ Uses yarn (`yarn.lock`).
 - `yarn kb <command>`: the core from the command line, `core/cli/kb.ts` run as TypeScript under Electron's Node
   (`yarn kb --help`): `import` a backup's `data.json`, `search`, `ask`, `eval` on the golden set, `status`, `key`,
   `serve` (the API for the extension, as the app runs it), `add-browser` (pairs a browser), `new-token` (a paired
-  browser's new token), `remove`, `cloud`.
+  browser's new token), `sync` (a Rocket.Chat source once; the app adds it), `remove`, `cloud`.
   It works on the real knowledge base in `~/.local/share/stenograma-kb/`; `STENOGRAMA_KB_DATA` points it elsewhere.
 - `yarn bench [chunks]`: search timings on a throwaway knowledge base of generated chunks (N3: p95 under 300 ms at 100k).
 
@@ -46,7 +47,19 @@ Uses yarn (`yarn.lock`).
   - `service.ts`: the core as the app runs it (the lock, the database, the API, the embedding queue with a model's
     rebuild, answers in parts, settings and keys), answering the methods of `protocol.ts`. `protocol.ts` is types only,
     with no imports, so the renderer's project reads it too. `chats.ts`: the saved chats. `stenograma/meeting.ts`: a
-    cited meeting from the kept rows; `summaries.ts` keeps its short summary, made by `answer/summary.ts`.
+    cited meeting from the kept rows, and a source's list of meetings; `summaries.ts` keeps its short summary, made by `answer/summary.ts` (by hand, or in
+    the background for a series's meetings) and indexed with it. `stenograma/series.ts`: meeting series by Meet code or
+    weekday and time, named by the user, in the meetings' titles and `documents.series_id`.
+  - `connectors/runner.ts`: the sources a connector syncs, each on its timer, "Sync now", backoff after a failure.
+  - `chat/`: messengers whatever the source (F3): `types.ts` (a message as kept), `store.ts` (`chat_rooms`,
+    `chat_messages`, and their documents: a room's day, a thread, a file's text), `chunk.ts` (30-minute pauses, quotes
+    as `> ` lines), `attachments.ts` (the files whose content is read, kept next to the database, never in the global
+    data directory, so a test's never touch the real ones) and `read.ts` (an image by a vision model, a PDF with
+    `unpdf`). The service reads them in a queue, after answers.
+  - `rocketchat/`: the REST API with its rate limits (`api.ts`), its rooms and messages as `chat/` keeps them
+    (`convert.ts`), a run of the sync with each room's cursors (`sync.ts`), and the runner's connector. Its token is in
+    the keyring under the knowledge base's id (`tokenSecretName`); the service takes `secrets` and `fetch`, which the
+    tests replace (`tests/core/rocketchat-fake.ts`), so they never touch the real keyring or network.
   - `embed/`: providers (Ollama, Gemini), vector tables (bit vectors, rescored from `embedding_cache`), the cache and
     the queue. `llm.ts`, `answer/` (rewrite, answers, summaries), `secrets.ts` (keyring), `settings.ts`, `lock.ts`,
     `eval.ts`, `cli/kb.ts`.

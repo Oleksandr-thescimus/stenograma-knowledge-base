@@ -15,6 +15,8 @@ export interface DocumentInput {
   createdAt: number;
   url?: string;
   madeByAi: boolean;
+  // A meeting's series (stenograma/series.ts)
+  seriesId?: number | null;
   chunks: ChunkDraft[];
 }
 
@@ -38,10 +40,10 @@ const deleteChunks = (db: Db, ids: number[]) => {
 export const syncDocument = (db: Db, doc: DocumentInput, embedModel: string | null) => {
   const now = Date.now();
   db.prepare(`
-    insert into documents (id, source_id, kind, thread_id, title, author, participants, created_at, updated_at, url, made_by_ai)
-    values (@id, @sourceId, @kind, @threadId, @title, @author, @participants, @createdAt, @now, @url, @madeByAi)
+    insert into documents (id, source_id, kind, thread_id, title, author, participants, created_at, updated_at, url, made_by_ai, series_id)
+    values (@id, @sourceId, @kind, @threadId, @title, @author, @participants, @createdAt, @now, @url, @madeByAi, @seriesId)
     on conflict (id) do update set kind = @kind, thread_id = @threadId, title = @title, author = @author,
-      participants = @participants, created_at = @createdAt, updated_at = @now, url = @url, made_by_ai = @madeByAi
+      participants = @participants, created_at = @createdAt, updated_at = @now, url = @url, made_by_ai = @madeByAi, series_id = @seriesId
   `).run({
     id: doc.id,
     sourceId: doc.sourceId,
@@ -54,6 +56,7 @@ export const syncDocument = (db: Db, doc: DocumentInput, embedModel: string | nu
     now,
     url: doc.url ?? null,
     madeByAi: doc.madeByAi ? 1 : 0,
+    seriesId: doc.seriesId ?? null,
   });
 
   const sourceKind = (db.prepare('select kind from sources where id = ?').get(doc.sourceId) as { kind: string }).kind;

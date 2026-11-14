@@ -65,6 +65,14 @@ export const pendingEmbeddings = (db: Db, provider: Pick<EmbeddingProvider, 'id'
   where j.model = ? and (? or s.cloud_allowed = 1)
 `).get(provider.id, provider.local ? 1 : 0) as { n: number }).n;
 
+// The same, by source
+export const pendingBySource = (db: Db, provider: Pick<EmbeddingProvider, 'id' | 'local'>) => new Map((db.prepare(`
+  select d.source_id as sourceId, count(*) as n from jobs j
+  join chunks c on c.id = j.chunk_id join documents d on d.id = c.document_id join sources s on s.id = d.source_id
+  where j.model = ? and (? or s.cloud_allowed = 1)
+  group by d.source_id
+`).all(provider.id, provider.local ? 1 : 0) as { sourceId: number, n: number }[]).map((row) => [row.sourceId, row.n]));
+
 interface PendingChunk {
   chunkId: number;
   header: string;

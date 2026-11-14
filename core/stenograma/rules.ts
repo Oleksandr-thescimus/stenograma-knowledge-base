@@ -38,12 +38,12 @@ export const sortActionItems = (items: ActionItem[]) => [...items].sort((a, b) =
 // ones, "/abc-defg-hij -> M/D/YYYY h:mm:ss AM"
 const MEET_CODE = /^\/?(?:meet\/)?([a-z]{3}-[a-z]{4}-[a-z]{3})$/;
 
-// As the extension's getSessionTitle: the given name, else Meet's, else the code
-export const getSessionTitle = (session: Session) => {
-  const code = session.sessionId.split(' -> ').map((part) => MEET_CODE.exec(part.trim())?.[1]).find(Boolean);
+// The Meet code in a session's id: a recurring event keeps its code, so it's what a meeting series is found by
+export const getMeetCode = (session: Pick<Session, 'sessionId'>) => session.sessionId.split(' -> ')
+  .map((part) => MEET_CODE.exec(part.trim())?.[1]).find(Boolean) ?? null;
 
-  return session.customName || session.meetTitle || code || session.sessionId;
-};
+// As the extension's getSessionTitle: the given name, else Meet's, else the code
+export const getSessionTitle = (session: Session) => session.customName || session.meetTitle || getMeetCode(session) || session.sessionId;
 
 // When the session started: startDate, else the time in its id (local time, as the extension writes it)
 export const getSessionDate = (session: Session) => {

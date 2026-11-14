@@ -93,10 +93,19 @@ export interface SummarizeOptions {
   onProgress: (done: number, all: number) => void;
   // The summary as it streams
   onText: (text: string) => void;
+  // Each model call when it's done: its time and tokens (undefined when the provider doesn't say)
+  onCall?: (call: SummaryCall) => void;
+}
+
+export interface SummaryCall {
+  kind: 'notes' | 'combine' | 'summary';
+  ms: number;
+  inputTokens: number | undefined;
+  outputTokens: number | undefined;
 }
 
 export const summarizeTranscript = async (model: LanguageModel, settings: LlmSettings, options: SummarizeOptions) => {
-  const { header, lines, abortSignal, onProgress, onText } = options;
+  const { header, lines, abortSignal, onProgress, onText, onCall } = options;
   const call = summaryCallOptions(settings);
   const language = meetingLanguage(lines);
   const systems = { summary: summarySystem(language), notes: notesSystem(language), combine: combineSystem(language) };
@@ -115,8 +124,9 @@ export const summarizeTranscript = async (model: LanguageModel, settings: LlmSet
     const next: string[] = [];
 
     for (const [index, part] of level.entries()) {
+      const started = Date.now();
       // eslint-disable-next-line no-await-in-loop
-      const { text } = await generateText({
+      const { text, usage } = await generateText({
         model,
         abortSignal,
         system: notes ? systems.combine : systems.notes,
@@ -124,6 +134,7 @@ export const summarizeTranscript = async (model: LanguageModel, settings: LlmSet
         maxOutputTokens: MAX_NOTES_TOKENS,
         ...call,
       });
+      onCall?.({ kind: notes ? 'combine' : 'notes', ms: Date.now() - started, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens });
       next.push(text.trim());
       done += 1;
       onProgress(done, all);
@@ -139,6 +150,7 @@ export const summarizeTranscript = async (model: LanguageModel, settings: LlmSet
   }
 
   let streamError: unknown;
+  const started = Date.now();
   const result = streamText({
     model,
     abortSignal,
@@ -167,6 +179,11 @@ export const summarizeTranscript = async (model: LanguageModel, settings: LlmSet
 
   if (!summary.trim()) {
     throw new Error('The model gave no summary');
+  }
+
+  if (onCall) {
+    const usage = await Promise.resolve(result.usage).catch(() => null);
+    onCall({ kind: 'summary', ms: Date.now() - started, inputTokens: usage?.inputTokens, outputTokens: usage?.outputTokens });
   }
 
   return summary.trim();

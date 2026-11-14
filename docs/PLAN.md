@@ -232,6 +232,164 @@ on the release") and draft replies to new emails and messages.
   - An imported backup stays apart: it's removed once a browser is paired (F7).
   - A migration cut the copies indexed before to one: that of the browser that sent last. In the knowledge base then,
     Chrome and Firefox2 had 252 sessions in common, all with the same rows, and Firefox2's copies were kept.
+- **Rocket.Chat is the first connector**, ahead of M3.5 and M4, as it's the messenger used every day. It brings the
+  connectors' base (each source on a 5-minute timer, "Sync now", a failed run tried again later, twice as late each
+  time up to an hour) and the chat chunker of F3. Its auth is the simplest, a pasted token, so the base is built without
+  an OAuth flow.
+  - A Personal Access Token with the user's id, checked with `me` before the source is added; it's kept in the keyring
+    under the knowledge base's id too. It has the user's full access, which can't be narrowed, so `kb` still has no
+    code that writes. A refused token is replaced with "Edit".
+  - The rooms read: those chosen (the default), or all the user is in of the types ticked (channels, private groups,
+    direct messages), rooms joined later too; livechat rooms never. The period read is chosen (the last 1–12 months, or
+    everything); an earlier start reads the rooms again, a later one drops the messages before it. Both change with
+    "Edit". A room no longer chosen, or left, goes with its messages.
+  - Each run lists the subscriptions and the rooms' last message (`rooms.get`), and reads the rooms with a new one;
+    every room every 6 hours, for edits and deletions. `chat.syncMessages` gives the messages updated after a room's
+    cursor, thread replies too, and those deleted: in pages from 7.1 (`type=UPDATED|DELETED`, `next`), at once before.
+    A room not read for 28 days is read whole, as the server forgets deleted messages after 30.
+  - Rocket.Chat allows 10 calls a minute per endpoint by default (enforced from 7.9): a call waits when none are left,
+    and a 429 is tried again after the reset. That limit is per IP address, shared by colleagues on the same network,
+    so a source keeps its own, lower one: 5 calls a minute of each kind by default. With it, the first read takes about a
+    minute per 5 rooms, or per 5,000 messages.
+  - A source's load is set with "Edit" ("Load on the server"): how often it syncs (5, 15, 30 or 60 minutes), its calls
+    a minute of each kind (1–30), and the pause between files fetched in the background (3 s by default; images wait
+    on the model anyway, documents don't). Files are fetched one at a time, those shown in the app too.
+  - A message is kept as its author, text, the messages it quotes (the server's attachments with `message_link`; the
+    `[ ](link)` in the text is dropped) and its files' names. System messages, deleted ones shown as such (`rm`) and
+    end-to-end encrypted ones aren't kept.
+  - A room's day is a document, and a thread another, with its first message: its replies stay together (F3), and
+    every chunk's header names the room, and a thread's also what it started with, so a reply keeps its context in an
+    answer. A quoted message is a `> Author: text` line before its reply, which the search doesn't count as the
+    quoted person speaking. The answer's prompt says how to read both.
+  - A cited conversation opens in the app from its own copy, at the cited messages, with its threads and "Open in
+    Rocket.Chat" (a permalink by the room's type and name). A chunk's time is the time of day.
+  - Off for cloud AI by default (F8).
+  - Each room's members are read once a day (`channels.members`, `groups.members`, `im.members`, a call per 100) and
+    shown with a cited conversation. In a room of up to 20 people they're its documents' participants too, so the
+    person filter finds the conversations someone is in though they didn't write; in a larger one, such as #general
+    with the whole company (~55 people), membership tells nothing, and only those who wrote are. The chunks don't change
+    with them, so nothing is embedded again.
+  - The answer's context lists a room's members once, with its first source ("Room members (14): …"), as the messages
+    name only those who wrote: "who's in the PMO course?" is answered when that room's messages are found. Which rooms
+    someone is in isn't answered; a document of each room's members, found by the search, would do it.
+  - Reactions are kept with their people, named by the rooms' members and the messages' authors (`chat_users`; a
+    reaction gives usernames): "[reactions: 👍 Olena Koval, Andrii Melnyk; ✅ Taras]" in the message's line, at most 5
+    names an emoji, and under the message in the conversation view. A 👍 from the right person is often the decision.
+    Those who reacted are the document's participants. A reaction doesn't change a room's last message, so it's read in
+    the check every 6 hours, or with the room's next message.
+  - Not caught: a message deleted on a server that keeps history but doesn't show deletions (it's hidden, and reported
+    by no call).
+  - Still to do: the check on the real server (its version, and that the admin allows tokens), and 3–5 golden set
+    questions about it with `kb eval`.
+- **Images and files in chats are read**, in the background, newest first, after answers and summaries (they use the
+  same model). In a work chat a screenshot often holds the point: an error, a ticket, figures.
+  - An image (PNG, JPEG, WebP, GIF up to 10 MB) goes to a vision model: its text word for word, and what it shows in a
+    sentence or two. The default is the answers' `qwen3.5:9b`, which reads images; ~20 s an image on this machine's
+    6 GB GPU once loaded. Its own settings: on or off, Ollama's vision models or Gemini, and the period (the last
+    3 months by default). Gemini only reads the chats that may go to cloud AI; the others' images go to Ollama's
+    default (F8, as summaries).
+  - What it read goes into the message's line, "[image name, described by AI: … Text in it: …]", so the search finds
+    the screenshot by its error and the answer can use it; a text over 600 characters is a document of its own too.
+    The answer's prompt and the conversation view say it's by AI.
+  - A PDF's text layer and a text file (up to 30 MB) are read without a model, each a document of its own (`chat-file`)
+    that opens its message. A scanned PDF has no text and is left out. Word and Excel files aren't read yet.
+  - The settings try the model, as set and before it's saved, on one of the chats' latest images, keeping nothing; "Read
+    all images again" reads them with the model saved.
+  - Images are kept next to the knowledge base (`attachments/<source>/<file>`, mode 0600) and shown in the conversation
+    view as `data:` URLs, which the CSP already allows; SVG isn't read or shown. A document's file isn't kept.
+  - A file is fetched with the token as headers and as the cookies (`rc_uid`, `rc_token`) Rocket.Chat's web client
+    sends, as servers check one or the other: unchecked on a real server yet.
+  - A model or server that isn't there stops the run, tried again a minute later, without counting against the file;
+    another failure counts, and a file is marked failed after 3.
+  - `ollama-ai-provider-v2` sent an image's bytes as a JSON object, which Ollama refused: images go as base64.
+- **A chat room, and the most reactions, in questions.** "Which message in qa_dev_talks got the most reactions?" isn't
+  a search: the chunks most like it say nothing of counts, and the answer sees 8 of the room's thousands. So the
+  rewrite also gives the room a question names and `"rank": "reactions"`.
+  - The room is found by its name or title however written ("qa_dev_talks", "#qadevtalks", "QA dev talks") and limits
+    the search to its documents: all its chunks ranked by their float vectors, as the index's nearest of every source
+    hold few of one room. A room set by hand ("Chat room" in the filters) wins; one no room is called gives a warning.
+  - With the ranking, the sources are the chunks of the room's messages with the most reactions in the period, each with
+    a line saying how many ("A message here has 35 reactions: …"): a small model counts names badly.
+  - Other counts ("who wrote the most", "how many messages a week") would need tools for the model (function calling),
+    not taken yet.
+- **A Rocket.Chat source tells what it has.** Its card sums its messages, threads, messages with reactions, images and
+  files (how many read); "Edit" shows each room's members (the server's count) and, for a room it reads, the same counts
+  and when it was last synced.
+- **Reading images can be paused** (for an hour, four, or until resumed: in Settings, on Sources, and from the tray),
+  as the vision model takes the GPU while the user works on something else. The image being read is stopped without
+  counting against it, and Ollama lets go of the model at once (`keep_alive: 0`) instead of after 5 minutes; documents
+  are still read. The pause is kept in the settings file, so it outlasts a restart, and ends by itself.
+- **A chat's model is chosen in the chat**, and "Ask again with…" under an answer, ahead of M3.5. The list next to the
+  question has Ollama's models that answer (not its embedding models or rerankers), and Groq's and Gemini's, listed by
+  their APIs when their key is in the keyring (for 10 minutes). A chat keeps the model of its last question
+  (`chats.llm`); a new one takes the settings'. Each answer says which model gave it. A cloud model still sees only the
+  sources that may go to cloud AI (F8).
+  - A small model (`gemma3:4b`) made up a date range in the rewrite and found nothing: the filters undone in one click
+    (M3.5) matter more with a choice of models.
+
+2026-11-13:
+
+- **The chat's composer is one frame**, as in other chat apps: the question above, and its bar below with the filters
+  on the left (set in a popover, each active one a chip with ✕) and the chat's model on the right, next to sending
+  (🖥 on this computer, ☁ in the cloud). "New chat" left it: the sidebar's + and Ctrl+N start one. Under an answer,
+  the model that gave it, and "Ask again with…" in the same style.
+- **What the rewrite took from a question is chips** under "Searched for" (the days, the person, the room, "by the most
+  reactions"): ✕ asks again without it (`ask`'s `without`), as when a small model made up a date range. Filters set by
+  hand still win.
+
+- **Meeting series.** Questions such as "what was discussed at the lead meetings last month" need to know which meetings
+  are the lead meetings: in the knowledge base then, 16 of 303 Meet calls had Meet's name and 10 the user's, the others
+  only their code. A recurring calendar event keeps its Meet code: 23 codes, and 8 of 4+ meetings held 280 of them.
+  - A series is a name and matchers: a Meet code, a weekday and time (±20 min by default), a period. The most specific
+    that fits a meeting wins, so a code used for different meetings (a team's own room) is told apart by its times.
+    Sources → "Meeting series" lists the meetings by code (how many, the weekday and time most have, who speaks), to
+    name once.
+  - The series's name is the meeting's title ("Lead meeting · Planning" with its own), in its chunks' header, and
+    `documents.series_id`. A series saved or deleted indexes every meeting again; only the chunks whose header changed
+    are embedded again.
+  - The rewrite is given the series' names and returns one ("лід мітинги" → "Lead meeting"); "Meeting series" in the
+    filters sets it by hand. It's a chip with ✕, as the others.
+  - A question about a series gets a source for each of its meetings in the period, the newest first (at most 30): its
+    short summary, or the extension's, else its 2 chunks most like the query. The top chunks of all its meetings would
+    leave most of them out.
+  - The meetings of a named series get a short summary in the background (Settings → "Meeting summaries": on, the last 3
+    months by default), as "Summarize" makes them, after the images and documents and paused with them ("the background
+    AI work", from Settings, Sources or the tray).
+  - Short summaries are indexed now, as `meeting-short-summary` documents made by AI, and found by any question (the
+    Decisions of 2026-11-03 had them kept but not indexed).
+  - **Their progress is shown** (Sources → Index, Settings), as on Ollama a long meeting is several minutes of calls:
+    the meeting being summarized, its step (a part's notes or the summary), its time so far and its model (on this
+    computer or in the cloud); the average time of the model's last 10 summaries and the time left by it, with the
+    output tokens a second; the meetings skipped until a restart, the last error; and, when none is made while some
+    wait, why (an answer goes first, the chats' files are read first, paused, the model not reached and when it's tried
+    again). `summaries` keeps each one's time and calls for the average; the core's log has each call's time and
+    tokens. The sidebar's line adds the time left ("Summarizing meetings: 14 left, ~1 h 20 min").
+
+- **The Sources page.** One "Add a source" opens tiles of what can be added (a browser with Stenograma, Rocket.Chat),
+  each going on to its own steps; an empty page shows the same tiles. Another source is a tile more, not a button more.
+  - Sources, "Meeting series" and "Index" (the embeddings, the background AI work and its pause, the API's address) are
+    tabs: the series no longer push the index down.
+  - A card shows its icon, its state as a dot (synced, syncing, waiting for a browser's first push, failed), what it has
+    in the units of its kind (meetings, rooms, messages) instead of documents and chunks, and its cloud switch with the
+    explanation in a tooltip. Rare actions (rename, a new token, rooms and period, remove) are in its "⋯" menu.
+  - A meetings source's card also says when its browser last checked in without sending ("Sent 14:47 · checked 19:40,
+    nothing new": a push calls `/status` first, which keeps `last_seen_at`, while "Sent" is the last `/ingest`), so
+    an extension that doesn't reach the app is told apart from one with nothing new; its meetings' period, the newest
+    one, those with a short summary and in series, its chunks waiting for embeddings, and the meetings indexed from
+    another browser's copy by that browser's name.
+  - "⋯ → Meetings…" lists a browser's or a backup's meetings, the newest first, filtered by title, series or date, and
+    opens one in the meeting view (as a citation does, from the copy that's indexed, which a summary is kept with). It's
+    there to see what the knowledge base has; chats aren't listed, Rocket.Chat shows them.
+  - Icons: the browsers' and Rocket.Chat's marks, from Simple Icons (CC0), drawn inline as the CSP loads nothing. Edge
+    has none there, so a globe. A browser source's browser is chosen when it's added (`sources.config.browser`), else
+    guessed from its label ("Firefox2" is a Firefox); "Rename" changes both (`updateBrowser`).
+  - Adding a browser shows the extension's steps (its popup's "Local knowledge base", the URL only when the port isn't
+    the extension's default) and waits for the browser's first push: "Firefox is connected: 120 meetings". "New token"
+    does the same.
+  - A connector's error comes with what fixes it: the runner keeps the last run's `problem` (`auth`: the token refused or
+    missing from the keyring; `network`: the server not reached; `other`), and the card offers "Enter a new token" or
+    "Try again", with the next try's time. The new token has a method of its own, `setRocketChatToken`, as "Rooms and
+    period" can't list the rooms with the refused one.
 
 ## Why Electron, with a core of its own
 
@@ -245,6 +403,14 @@ talks to it over a `MessagePort`; `kb search` and `kb eval` run the same core fr
 
 Running the core inside the app means:
 
+- **The sidebar's status line** shows the one thing most worth knowing, in this order: a source whose sync failed
+  (with why: a new token needed, the server not reached), the extension unable to send, the index or the reading of
+  images stopped by an error, the work going on (indexing, a model's rebuild, images and files, meeting summaries, with
+  how much is left), the background AI paused, else "Up to date" (not a count of chunks). Its tooltip has the whole
+  state, and a click opens the Sources page's tab where it's seen and fixed. A routine sync isn't shown: it would blink
+  every few minutes.
+- **Starting at login** is a checkbox in the tray's menu, no longer in Settings: the app stays there. Saving Settings
+  keeps it as the tray set it.
 - Syncing, polling and the extension's pushes work only while the app runs, so it starts at login and closing the
   window leaves it in the tray. The extension shows that the knowledge base isn't running and tries again at its next
   alarm.
@@ -346,7 +512,8 @@ Alternatives considered:
   - Backfill of the last 12 months (configurable), without Spam, Trash, Promotions and Social.
   - Senders can be excluded; the status lists the senders with the most documents, to find noise (notifications,
     newsletters).
-  - Attachments aren't indexed in v1, only their names.
+  - Attachments aren't indexed in v1, only their names. A chat's images and documents are ([Decisions](#decisions),
+    2026-11-12).
 - **F3. Messengers (Teams chats, Telegram, Rocket.Chat, Slack).**
   - Messages are grouped into chunks per conversation and time window: a pause over 30 minutes starts a new chunk, at
     most ~400 tokens each.
@@ -470,13 +637,18 @@ without approval, a people directory that joins one person's names across source
   - `@azure/msal-node`, `telegram` (GramJS), `@slack/web-api` and `@slack/socket-mode`, `html-to-text`.
 - **Schema.**
   - `sources`: kind, account, config, cursor, cloudAllowed, repliesEnabled, enabled, lastSyncAt, lastError; for a
-    browser, the hash of its token.
+    browser, the hash of its token and lastSeenAt (its last call to the API, a push or not).
   - `documents`: `id` = `<source>:<nativeId>`, kind, threadId (the conversation), title, author, participants,
     createdAt, updatedAt, url, madeByAI.
   - `chunks`: documentId, ord, text with a context header ("[Email · subject · from · date]"), textHash, startMs for
     transcripts.
   - `stenograma_rows`: the rows a browser pushed (source, table, key, JSON), so the core can index them again when the
     rules of F1 change, without a push, and another browser's copy of a session can take over.
+  - `chat_rooms` (a messenger's rooms read, with their cursors and members) and `chat_messages` (each message as the
+    chunker reads it: author, text, quotes, files, its thread), so a room is indexed again without a sync. A room's day
+    is a document (`chat`), a thread another (`chat-thread`), and a file's text a third (`chat-file`).
+  - `chat_attachments`: a message's image or document whose content is read, with its state (pending, done, failed,
+    skipped), what was read (text, an image's description) and the model.
   - `chunks_fts`.
   - `vec_<model>`: a vector table per embedding model, so the model can change without downtime. It holds bit vectors
     (the signs), and `sourceKind` and `createdAt` are its metadata columns.
@@ -485,8 +657,8 @@ without approval, a people directory that joins one person's names across source
   - `chats` and `chat_turns`: the app's chats; a turn's question, request, cited sources (ids, without the chunks'
     text), answer and state; from M3.5 its tokens.
   - `llm_usage` (M3.5): tokens in and out per day and model, and the number of calls.
-  - `summaries`: the app's short summary of a document (a meeting), with the hash of the text it summarized and the
-    model; it goes with its document.
+  - `summaries`: the app's short summary of a document (a meeting), with the hash of the text it summarized, the
+    model, and how long it took in how many calls (null for those made before 2026-11-13); it goes with its document.
   - `drafts`: source, conversation, the message replied to, text, the chunks used, status (`pending`, `sent`,
     `dismissed`), createdAt; and `sent_log`.
 - **Embeddings.** One provider interface with three implementations:
@@ -566,7 +738,7 @@ URL needed), or every minute and over live connections for sources with reply dr
 | Teams | The same MSAL session, `Chat.Read` | `/me/chats?$expand=lastMessagePreview`, then `/me/chats/{id}/messages` with `$filter=lastModifiedDateTime gt …` only for chats with a newer last message. Edits and deletions don't change the preview, so chats active in the last 7 days are read again daily | `deletedDateTime` | `POST /chats/{id}/messages` (`ChatMessage.Send`) | The same; channels later (admin consent) |
 | Gmail | Own GCP "Desktop app" OAuth client, `gmail.readonly` | `history.list` from `historyId`; on 404 (history expired) a resync by date | `messagesDeleted` | `messages.send` with `threadId` and `In-Reply-To` / `References` (`gmail.send`) | Workspace: an Internal app (no verification, no 7-day token expiry). Personal Gmail: External set to "In production", with the unverified-app screen (in Testing, refresh tokens last 7 days) |
 | Telegram | GramJS with api_id / api_hash from my.telegram.org; phone, code and 2FA entered in the app | `minId` per chat; the last 7 days scanned again for edits | Only live events, plus the 7-day rescan | `sendMessage` with `replyTo` | FLOOD_WAIT limits. The session is full access to the account, so keyring only. A login through a new api_id can get an account limited, so request rates stay low; the fallback is Telegram Desktop's JSON export of chosen chats |
-| Rocket.Chat | Personal access token (`X-User-Id`, `X-Auth-Token`), or login with TOTP | `subscriptions.get`, then `chat.syncMessages?roomId=…&lastUpdate=…` per room | `result.deleted` | `chat.sendMessage` (`tmid` in a thread) | The server version (the syncMessages API changed); whether the admin allows personal access tokens |
+| Rocket.Chat | Personal access token (`X-User-Id`, `X-Auth-Token`) | `subscriptions.get` and `rooms.get` (each room's last message), then `chat.syncMessages` for the rooms with a new one: pages of `type=UPDATED` from a cursor (7.1+), `lastUpdate` before; every room every 6 hours | `type=DELETED` pages (the server keeps them 30 days) | `chat.sendMessage` (`tmid` in a thread) | The server version; whether the admin allows personal access tokens; the rate limit (10 calls a minute per endpoint by default) |
 | Slack | Own Slack app with user scopes (`channels:history`, `groups:history`, `im:history`, `mpim:history`, `users:read`; `chat:write` for replies), installed from its settings page. Its user token (`xoxp-…`) and, for live events, an app-level token (`xapp-…`) are pasted into the app, so no OAuth flow is needed | `users.conversations`, then `conversations.history?oldest=…` per conversation; threads with `conversations.replies` | `message_deleted` events while connected, plus a rescan of the last 7 days | `chat.postMessage` with `thread_ts` | Whether an admin has to approve the app. Whether the much lower limits announced in 2025 for apps outside the Marketplace (`conversations.history` / `conversations.replies`) apply to an app made for its own workspace |
 
 Private Telegram chats have no links to a message, so their citations show the message's text.
@@ -659,6 +831,8 @@ for one person, not counting the wait for a store review.
 
 - M0 → M1 → M2 → M3 → M3.5 in this order. M4–M6 can go in any order after M3.5. Microsoft goes first: one sign-in covers
   two sources, and it brings both the email and the chat chunker. M7 and M8 use the sources connected by then.
+  Rocket.Chat went first, before M3.5, with the connectors' base and the chat chunker ([Decisions](#decisions),
+  2026-11-12).
 - Every change to the extension is in M2, so there's one store release, and its review runs while M3 is built.
 - Meetings alone (M0–M3.5) take 23–32 days; all of it takes 42–60.
 
@@ -788,7 +962,7 @@ Exit, by hand:
 
 What makes the app worth opening every day while it has meetings only, and what tells when it stops getting them.
 
-- **The rewrite's filters, undone in one click.** "Searched for" shows the dates and the person taken from the question
+- **The rewrite's filters, undone in one click** (done: Decisions, 2026-11-13). "Searched for" shows the dates and the person taken from the question
   as chips with a ✕. Removing one asks again without it. A small local model can make up a date range for a question
   without one, and the meetings it hides can't be seen (M3, `qwen3.5:4b`).
 - **Problems told, not found out from a missing citation.** A notification and the tray's icon when:
@@ -808,7 +982,8 @@ What makes the app worth opening every day while it has meetings only, and what 
 - **Answers rated.** 👍 or 👎 on an answer; "Add to the golden set" keeps the question with the sources it should find
   in `eval/golden-set.json` in the data directory, never in the repo (N6). It grows the golden set from real questions,
   which M0 left to do.
-- **Ask again, copy.** "Ask again with…" another configured model, as when Ollama is down or the answer is weak.
+- **Ask again, copy.** "Ask again with…" another configured model, as when Ollama is down or the answer is weak (done:
+  Decisions, 2026-11-12).
   "Copy" gives the answer with the meetings' titles and dates in place of `[n]`, to paste into a chat or an email.
 - **Tokens.** Under each answer, the tokens it used, in and out (the rewrite and the answer), kept with the chat. In
   the settings, the totals of today and of this month per model, in a table of their own (`llm_usage`), so deleting a
@@ -833,7 +1008,7 @@ Exit:
 |---|---|---|
 | M4 | Outlook and Teams chats, on one MSAL session | The loopback OAuth callback; the email chunker with quote and signature stripping, and sender exclusion (F2); the chat chunker with threads (F3); emails shown in the app as text or in a sandboxed iframe |
 | M5 | Gmail | The Gmail categories left out (F2); a resync by date after a 404 |
-| M6 | Telegram, Rocket.Chat, Slack, each merged on its own | Telegram's sign-in (phone, code, 2FA) and chat allowlist; pasted Rocket.Chat and Slack tokens |
+| M6 | Telegram, Slack, each merged on its own (Rocket.Chat went first: Decisions, 2026-11-12) | Telegram's sign-in (phone, code, 2FA) and chat allowlist; a pasted Slack token |
 
 **A connector is done when:**
 

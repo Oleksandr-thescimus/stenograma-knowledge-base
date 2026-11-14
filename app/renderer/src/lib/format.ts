@@ -1,5 +1,5 @@
 // Dates and moments as people read them, in local time
-export { formatDay, formatMoment } from '../../../../core/format';
+export { emojiOf, formatChunkStart, formatDay, formatMoment, isChatDocument } from '../../../../core/format';
 
 // 12:34 into a meeting
 export const formatOffset = (ms: number) => {
@@ -33,5 +33,21 @@ export const sourceName = (source: { kind: string, account: string | null }) => 
     return 'Imported backup';
   }
 
+  if (source.kind === 'rocketchat') {
+    return 'Rocket.Chat';
+  }
+
   return source.account || source.kind;
+};
+
+// How long something takes: "45 s", "6 min", "1 h 24 min"
+export const formatDuration = (ms: number) => {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.round(seconds / 60);
+
+  if (seconds < 60) {
+    return `${seconds} s`;
+  }
+
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60} min` : ''}`;
 };

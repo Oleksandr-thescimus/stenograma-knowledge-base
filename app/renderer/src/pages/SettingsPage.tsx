@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { Check, Loader2 } from 'lucide-react';
 import type { KeyProvider, Settings } from '../../../../core/protocol';
+import ImageSettings from '@/components/ImageSettings';
+import SummaryProgress from '@/components/SummaryProgress';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -8,8 +10,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { errorMessage, useAppStatus } from '@/lib/kb';
 
-// The LLM and its keys (F6), the embedding model (F7), the extension's port (N2) and starting at login. The settings
-// file and the keyring are the core's: this page reads and writes them through it
+// The LLM and its keys (F6), the embedding model (F7), and the extension's port (N2); starting at login is in the tray's
+// menu. The settings file and the keyring are the core's: this page reads and writes them through it
 
 const LLM_PROVIDERS = [
   { value: 'ollama', label: 'Ollama, on this computer' },
@@ -244,6 +246,36 @@ const SettingsPage = () => {
             </p>
           )}
         </Card>
+        <Card
+          title="Images and files in chats"
+          description="Read in the background, newest first, and found with their message. A vision model reads an image's text and says what it shows; it's marked as described by AI."
+        >
+          <ImageSettings
+            settings={form.attachments}
+            saved={saved.attachments}
+            status={status?.core?.attachments}
+            onChange={(patch) => update('attachments', patch)}
+          />
+        </Card>
+        <Card
+          title="Meeting summaries"
+          description="A short summary of each meeting of a named series (Sources → Meeting series), made in the background by the answers' model, so a question about many meetings is answered from one each."
+        >
+          <label className="flex items-center gap-2 text-sm">
+            <Switch checked={form.summaries.auto} onCheckedChange={(auto) => update('summaries', { auto })} />
+            Summarize the series&apos; meetings in the background
+          </label>
+          <Field label="Meetings of">
+            <Select value={String(form.summaries.months)} onValueChange={(months) => update('summaries', { months: Number(months) })}>
+              <SelectTrigger className="w-64"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {[['1', 'The last month'], ['3', 'The last 3 months'], ['6', 'The last 6 months'], ['12', 'The last 12 months'], ['0', 'All']]
+                  .map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </Field>
+          {status?.core?.summaries && <SummaryProgress status={status.core.summaries} />}
+        </Card>
         <Card title="The extension" description="Stenograma in the browser sends its meetings to this port on 127.0.0.1.">
           <Field id="port" label="Port" hint="Change it in the extension's popup too.">
             <Input
@@ -256,21 +288,6 @@ const SettingsPage = () => {
               onChange={(event) => update('server', { port: Number(event.target.value) })}
             />
           </Field>
-        </Card>
-        <Card title="The app">
-          <label className="flex items-center gap-2 text-sm">
-            <Switch
-              checked={form.app.startAtLogin}
-              onCheckedChange={(startAtLogin) => update('app', { startAtLogin })}
-              disabled={!status?.canStartAtLogin}
-            />
-            Start at login, in the tray
-          </label>
-          <p className="text-xs text-muted-foreground">
-            {status?.canStartAtLogin
-              ? 'Closing the window keeps it syncing in the tray; Quit there stops it.'
-              : 'Only the installed app starts at login.'}
-          </p>
         </Card>
       </div>
       <div className="sticky bottom-0 border-t bg-background/95 backdrop-blur">

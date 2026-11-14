@@ -1,5 +1,5 @@
 import type { Db } from './db.ts';
-import type { AskPart, ChatSummary, ChatTurn, CitedSource, SavedChat, SavedTurn } from './protocol.ts';
+import type { AskPart, ChatSummary, ChatTurn, CitedSource, LlmSettings, SavedChat, SavedTurn } from './protocol.ts';
 
 // The app's chats, kept with the knowledge base (the plan's Decisions of 2026-11-03): each question with what the
 // rewrite made of it, the sources given and the answer. A cited chunk's text isn't kept, only its ids: it's read again
@@ -32,6 +32,10 @@ export const chatTitle = (question: string) => {
 export const createChat = (db: Db, question: string, now = Date.now()) => Number(db
   .prepare('insert into chats (title, created_at, updated_at) values (?, ?, ?)')
   .run(chatTitle(question), now, now).lastInsertRowid);
+
+// The model a chat's questions go to, from its last one
+export const setChatLlm = (db: Db, chatId: number, llm: LlmSettings | null) => db
+  .prepare('update chats set llm = ? where id = ?').run(llm ? JSON.stringify(llm) : null, chatId);
 
 export const chatExists = (db: Db, chatId: number) => Boolean(db.prepare('select 1 from chats where id = ?').get(chatId));
 
@@ -98,7 +102,7 @@ const resolveSources = (db: Db, turns: { sources: SourcesPart | null }[]) => {
 };
 
 export const getChat = (db: Db, chatId: number): SavedChat | null => {
-  const chat = db.prepare('select id, title from chats where id = ?').get(chatId) as { id: number, title: string } | undefined;
+  const chat = db.prepare('select id, title, llm from chats where id = ?').get(chatId) as { id: number, title: string, llm: string | null } | undefined;
 
   if (!chat) {
     return null;
@@ -114,5 +118,9 @@ export const getChat = (db: Db, chatId: number): SavedChat | null => {
   }));
   const resolve = resolveSources(db, turns);
 
-  return { ...chat, turns: turns.map((turn) => ({ ...turn, sources: resolve(turn.sources) })) };
+  return {
+    ...chat,
+    llm: chat.llm ? JSON.parse(chat.llm) as LlmSettings : null,
+    turns: turns.map((turn) => ({ ...turn, sources: resolve(turn.sources) })),
+  };
 };

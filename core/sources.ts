@@ -1,6 +1,8 @@
-import { BROWSER_KIND } from './browsers.ts';
+import { BROWSER_KIND, browserOf } from './browsers.ts';
+import { forgetSourceFiles } from './chat/attachments.ts';
 import type { Db } from './db.ts';
 import { deleteDocument } from './documents.ts';
+import type { BrowserKind } from './protocol.ts';
 import { reconcileSessions } from './stenograma/ingest.ts';
 
 export interface Source {
@@ -42,28 +44,71 @@ export const findOrCreateOnlySource = (db: Db, kind: string, account: string): S
 };
 
 export interface SourceStatus extends Source {
+  // A browser's, else null
+  browser: BrowserKind | null;
   documents: number;
   chunks: number;
+  meetings: number;
   lastSyncAt: number | null;
   lastError: string | null;
   // A browser's meetings indexed from another browser's copy (stenograma/ingest.ts)
   indexedElsewhere: number;
+  // Those by the source whose copy is indexed
+  copiesIn: { sourceId: number, meetings: number }[];
+  // When a browser last called the API (lastSyncAt is its last push)
+  lastSeenAt: number | null;
+  // Its meetings: the newest, the oldest's start, those with a short summary and those of a named series
+  latestMeeting: { title: string, createdAt: number } | null;
+  firstMeetingAt: number | null;
+  summarized: number;
+  inSeries: number;
 }
 
 // A meeting's document id is stenograma:<source>:<session> (meetingDocumentId)
-export const listSources = (db: Db) => (db.prepare(`
-  select s.id, s.kind, s.account, s.cloud_allowed as cloudAllowed, s.last_sync_at as lastSyncAt, s.last_error as lastError,
-    (select count(*) from documents d where d.source_id = s.id) as documents,
-    (select count(*) from chunks c join documents d on d.id = c.document_id where d.source_id = s.id) as chunks,
-    (select count(distinct r.session_id) from stenograma_rows r where s.kind = @browser and r.source_id = s.id
-      and not exists (select 1 from documents d where d.id = 'stenograma:' || s.id || ':' || r.session_id)) as indexedElsewhere
-  from sources s order by s.id
-`).all({ browser: BROWSER_KIND }) as (Omit<SourceStatus, 'cloudAllowed'> & { cloudAllowed: number })[]).map((row) => ({ ...row, cloudAllowed: Boolean(row.cloudAllowed) }));
+export const listSources = (db: Db): SourceStatus[] => {
+  const copies = db.prepare(`
+    select r.source_id as sourceId, d.source_id as indexedIn, count(*) as meetings
+    from (select distinct source_id, session_id from stenograma_rows) r
+    join sources s on s.id = r.source_id and s.kind = @browser
+    join sources o on o.id <> r.source_id and o.kind like 'stenograma%'
+    join documents d on d.id = 'stenograma:' || o.id || ':' || r.session_id
+    group by r.source_id, d.source_id
+  `).all({ browser: BROWSER_KIND }) as { sourceId: number, indexedIn: number, meetings: number }[];
+
+  return (db.prepare(`
+    select s.id, s.kind, s.account, s.config, s.cloud_allowed as cloudAllowed, s.last_sync_at as lastSyncAt, s.last_error as lastError,
+      s.last_seen_at as lastSeenAt,
+      (select count(*) from documents d where d.source_id = s.id) as documents,
+      (select count(*) from documents d where d.source_id = s.id and d.kind = 'meeting') as meetings,
+      (select count(*) from chunks c join documents d on d.id = c.document_id where d.source_id = s.id) as chunks,
+      (select min(d.created_at) from documents d where d.source_id = s.id and d.kind = 'meeting') as firstMeetingAt,
+      (select json_object('title', d.title, 'createdAt', d.created_at) from documents d where d.source_id = s.id and d.kind = 'meeting'
+        order by d.created_at desc limit 1) as latestMeeting,
+      (select count(*) from documents d join summaries m on m.document_id = d.id where d.source_id = s.id and d.kind = 'meeting') as summarized,
+      (select count(*) from documents d where d.source_id = s.id and d.kind = 'meeting' and d.series_id is not null) as inSeries
+    from sources s order by s.id
+  `).all() as (Omit<SourceStatus, 'cloudAllowed' | 'browser' | 'latestMeeting' | 'indexedElsewhere' | 'copiesIn'>
+    & { cloudAllowed: number, config: string, latestMeeting: string | null })[])
+    .map(({ config, latestMeeting, ...row }) => {
+      const copiesIn = copies.filter((copy) => copy.sourceId === row.id).map(({ indexedIn, meetings }) => ({ sourceId: indexedIn, meetings }));
+
+      return {
+        ...row,
+        cloudAllowed: Boolean(row.cloudAllowed),
+        browser: row.kind === BROWSER_KIND ? browserOf(row.account, config) : null,
+        latestMeeting: latestMeeting ? JSON.parse(latestMeeting) as { title: string, createdAt: number } : null,
+        copiesIn,
+        indexedElsewhere: copiesIn.reduce((sum, copy) => sum + copy.meetings, 0),
+      };
+    });
+};
 
 // F8. Turning it off doesn't take back what already went to a cloud provider; turning it on queues nothing new, the
 // chunks' jobs are already waiting for a cloud embedding provider
 export const setCloudAllowed = (db: Db, sourceId: number, allowed: boolean) => db
   .prepare('update sources set cloud_allowed = ? where id = ?').run(allowed ? 1 : 0, sourceId).changes > 0;
+
+export const markSeen = (db: Db, sourceId: number) => db.prepare('update sources set last_seen_at = ? where id = ?').run(Date.now(), sourceId);
 
 export const markSynced = (db: Db, sourceId: number, error?: string) => db
   .prepare('update sources set last_sync_at = ?, last_error = ? where id = ?').run(Date.now(), error ?? null, sourceId);
@@ -72,6 +117,7 @@ export const markSynced = (db: Db, sourceId: number, error?: string) => db
 // browser sent too is indexed from that browser's copy, for the embedding model
 export const removeSource = (db: Db, sourceId: number, embedModel: string | null) => db.transaction(() => {
   reconcileSessions(db, sourceId, [], embedModel);
+  forgetSourceFiles(db, sourceId);
   (db.prepare('select id from documents where source_id = ?').all(sourceId) as { id: string }[])
     .forEach(({ id }) => deleteDocument(db, id));
   db.prepare('delete from sources where id = ?').run(sourceId);

@@ -11,11 +11,18 @@ export interface StoredSettings extends Settings {
   // The embedding model being built in the background after a change (F7). `embedding` stays the one the search uses
   // until it's done
   embeddingRebuild?: EmbeddingSettings;
+  // The background AI work (images, summaries) paused, until then (milliseconds) or until resumed (null): it takes the
+  // GPU
+  backgroundPaused?: { until: number | null };
 }
 
 const OLLAMA_URL = 'http://127.0.0.1:11434';
 
 export const DEFAULT_SETTINGS: Settings = {
+  // The default LLM reads images too; files of the last 3 months, newest first
+  attachments: { describeImages: true, provider: 'ollama', model: 'qwen3.5:9b', ollamaUrl: OLLAMA_URL, readDocuments: true, months: 3 },
+  // A named series's meetings of the last 3 months get a short summary in the background
+  summaries: { auto: true, months: 3 },
   // M0 picked bge-m3 on Ollama (docs/PLAN.md, Decisions)
   embedding: { provider: 'ollama', model: 'bge-m3', ollamaUrl: OLLAMA_URL },
   llm: { provider: 'ollama', model: 'qwen3.5:9b', ollamaUrl: OLLAMA_URL },
@@ -45,10 +52,16 @@ export const loadSettings = (): StoredSettings => {
   const saved = JSON.parse(readFileSync(path, 'utf8')) as Partial<StoredSettings>;
 
   return {
+    attachments: { ...DEFAULT_SETTINGS.attachments, ...saved.attachments },
+    summaries: { ...DEFAULT_SETTINGS.summaries, ...saved.summaries },
     embedding: { ...DEFAULT_SETTINGS.embedding, ...saved.embedding },
     llm: { ...DEFAULT_SETTINGS.llm, ...saved.llm },
     server: { ...DEFAULT_SETTINGS.server, ...saved.server },
     app: { ...DEFAULT_SETTINGS.app, ...saved.app },
     ...(saved.embeddingRebuild && { embeddingRebuild: { ...DEFAULT_SETTINGS.embedding, ...saved.embeddingRebuild } }),
+    // Named imagesPaused before summaries were made in the background too
+    ...((saved.backgroundPaused ?? (saved as { imagesPaused?: StoredSettings['backgroundPaused'] }).imagesPaused) && {
+      backgroundPaused: saved.backgroundPaused ?? (saved as { imagesPaused?: StoredSettings['backgroundPaused'] }).imagesPaused,
+    }),
   };
 };

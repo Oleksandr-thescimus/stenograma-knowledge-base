@@ -3,15 +3,17 @@ import { chunkLines, chunkTranscript } from '../chunk.ts';
 import type { Db } from '../db.ts';
 import { deleteDocument, syncDocument } from '../documents.ts';
 import { formatDay } from '../format.ts';
-import { getParticipants, getSessionDate, getSessionTitle, pickMessages, pickSummary, sortActionItems } from './rules.ts';
+import { getMeetCode, getParticipants, getSessionDate, getSessionTitle, pickMessages, pickSummary, sortActionItems } from './rules.ts';
+import { listSeries, seriesOf } from './series.ts';
 import type { ActionItem, AssistantAnswer, Session, SessionBundle, Transcript } from './types.ts';
 
-// A session's documents: its text, the latest summary of the whole meeting and its action items (step 1 of Sending)
+// A session's documents: its text, the latest summary of the whole meeting and its action items (step 1 of Sending),
+// and the app's short summary ("Summarize", summaries.ts)
 export const meetingDocumentId = (sourceId: number, sessionId: string) => `stenograma:${sourceId}:${sessionId}`;
 const documentIds = (sourceId: number, sessionId: string) => {
   const id = meetingDocumentId(sourceId, sessionId);
 
-  return [id, `${id}:summary`, `${id}:actions`];
+  return [id, `${id}:summary`, `${id}:actions`, `${id}:short`];
 };
 
 const deleteCopy = (db: Db, sourceId: number, sessionId: string) => documentIds(sourceId, sessionId).forEach((id) => deleteDocument(db, id));
@@ -50,7 +52,7 @@ export const readRows = (db: Db, sourceId: number, sessionId: string) => {
 
 // Builds a session's documents from its rows by the rules of F1, and deletes those it no longer has
 const indexSession = (db: Db, sourceId: number, sessionId: string, embedModel: string | null) => {
-  const [meetingId, summaryId, actionsId] = documentIds(sourceId, sessionId);
+  const [meetingId, summaryId, actionsId, shortId] = documentIds(sourceId, sessionId);
   const { session, transcripts, answers, actionItems } = readRows(db, sourceId, sessionId);
 
   if (!session) {
@@ -59,11 +61,21 @@ const indexSession = (db: Db, sourceId: number, sessionId: string, embedModel: s
     return;
   }
 
-  const title = getSessionTitle(session);
+  // A meeting of a series is named by it: the code alone tells nothing
+  const series = seriesOf(listSeries(db), session);
+  const own = getSessionTitle(session);
+  // Its own name, unless it's only the code or the series's own
+  const named = own !== getMeetCode(session) && own !== session.sessionId && own.toLowerCase() !== series?.name.toLowerCase();
+  let title = own;
+
+  if (series) {
+    title = named ? `${series.name} · ${own}` : series.name;
+  }
+
   const date = getSessionDate(session);
   const createdAt = Number.isNaN(date.getTime()) ? 0 : date.getTime();
   const messages = pickMessages(session, transcripts);
-  const base = { sourceId, threadId: sessionId, title, createdAt, participants: getParticipants(session, messages) };
+  const base = { sourceId, threadId: sessionId, title, createdAt, participants: getParticipants(session, messages), seriesId: series?.id ?? null };
   const kind = session.origin === 'recording' ? 'Recording' : 'Meeting';
 
   syncDocument(db, {
@@ -93,7 +105,28 @@ const indexSession = (db: Db, sourceId: number, sessionId: string, embedModel: s
   } else {
     deleteDocument(db, actionsId);
   }
+
+  // The app's short summary, found by the search too: a question about many meetings is answered from them
+  const short = db.prepare('select text from summaries where document_id = ?').get(meetingId) as { text: string } | undefined;
+
+  if (short) {
+    syncDocument(db, {
+      ...base, id: shortId, kind: 'meeting-short-summary', madeByAi: true,
+      chunks: chunkLines(`[${kind} summary, made by AI · ${title} · ${formatDay(createdAt)}]`, short.text.split('\n')
+        .filter((line) => line.trim()).map((text) => ({ text }))),
+    }, embedModel);
+  } else {
+    deleteDocument(db, shortId);
+  }
 };
+
+// A meeting indexed again, as after its short summary is made
+export const reindexMeeting = (db: Db, sourceId: number, sessionId: string, embedModel: string | null) => db
+  .transaction(() => indexSession(db, sourceId, sessionId, embedModel))();
+
+// Every meeting indexed again, as after a series changes: only chunks whose text changed are embedded again
+export const reindexMeetings = (db: Db, embedModel: string | null) => (db.prepare('select id from sources where kind like \'stenograma-%\'')
+  .all() as { id: number }[]).forEach(({ id }) => reindexSource(db, id, embedModel));
 
 // A meeting that several browsers sent (a backup restored in each) is indexed once: else it's found twice, and its
 // copies take two of an answer's few places. Each browser's rows are kept, so another copy takes over when the indexed

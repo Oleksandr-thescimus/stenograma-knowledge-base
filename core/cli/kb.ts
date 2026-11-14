@@ -11,13 +11,15 @@ import { getKbId, openDb, type Db } from '../db.ts';
 import { embeddingModelId, isLocalEmbedding } from '../embed/provider.ts';
 import { embedPending, pendingEmbeddings } from '../embed/store.ts';
 import { evaluate, readGoldenSet, summarize } from '../eval.ts';
-import { formatDay, formatMoment } from '../format.ts';
+import { formatChunkStart, formatDay } from '../format.ts';
 import { createConfiguredEmbeddingProvider, createLanguageModel, isLocalLlm, llmKeyName } from '../llm.ts';
 import { acquireLock } from '../lock.ts';
 import { dataDir, dbPath, ensureDataDir, goldenSetPath, lockPath, settingsPath } from '../paths.ts';
 import { search, type SearchHit } from '../search.ts';
 import { buildServer, stenogramaOpenUrl } from '../server.ts';
-import { deleteSecret, setSecret } from '../secrets.ts';
+import { createRocketChatApi } from '../rocketchat/api.ts';
+import { readConfig, ROCKETCHAT_KIND, syncRocketChat, tokenSecretName } from '../rocketchat/sync.ts';
+import { deleteSecret, getSecret, setSecret } from '../secrets.ts';
 import { loadSettings } from '../settings.ts';
 import { findOrCreateOnlySource, listSources, markSynced, removeSource, setCloudAllowed } from '../sources.ts';
 import { bundlesFromBackup, readBackup } from '../stenograma/backup.ts';
@@ -38,6 +40,7 @@ const USAGE = `Usage: yarn kb <command>
   serve                The API for the extension on 127.0.0.1 (the port in settings.json), embedding what it pushes
   add-browser [label]  Pair a browser: makes its source and prints the token to paste into the extension's popup
   new-token <source>   A new token for a paired browser whose token is lost; the old one stops working
+  sync <source>        Sync a connector's source once (Rocket.Chat; the app syncs on its own), then embed
   remove <source>      Remove a source with all its documents
   status               Sources, documents and the embedding queue
   cloud <source> on|off
@@ -78,7 +81,7 @@ const parseDay = (day: string | undefined, nextDay = false) => {
   return date.getTime();
 };
 
-const hitLine = (hit: SearchHit) => `${hit.title} · ${formatDay(hit.createdAt)}${formatMoment(hit.startMs)}${hit.madeByAi ? ' · made by AI' : ''}`;
+const hitLine = (hit: SearchHit) => `${hit.title} · ${formatDay(hit.createdAt)}${formatChunkStart(hit)}${hit.madeByAi ? ' · made by AI' : ''}`;
 
 const describeRequest = (request: SearchRequest) => [
   request.from !== undefined && ` · from ${formatDay(request.from)}`,
@@ -405,8 +408,43 @@ const commands: Record<string, () => Promise<void>> = {
 
     if (/^y/i.test(answer)) {
       removeSource(db, source.id, embeddingModelId(loadSettings().embedding));
+
+      if (source.kind === ROCKETCHAT_KIND) {
+        deleteSecret(tokenSecretName(getKbId(db), source.id));
+      }
+
       console.log(`Removed source ${source.id}`);
     }
+  }),
+
+  sync: () => withWritableDb(async (db) => {
+    const source = listSources(db).find((candidate) => candidate.id === Number(args[0]) && candidate.kind === ROCKETCHAT_KIND);
+
+    if (!source) {
+      throw new Error('Usage: yarn kb sync <Rocket.Chat source id> (yarn kb status lists them; the app adds one)');
+    }
+
+    const token = getSecret(tokenSecretName(getKbId(db), source.id));
+
+    if (!token) {
+      throw new Error(`The token of source ${source.id} isn't in the keyring: give it again in the app`);
+    }
+
+    const api = createRocketChatApi({ ...readConfig(db, source.id), token });
+
+    try {
+      const result = await syncRocketChat({
+        db, sourceId: source.id, api, embedModel: embeddingModelId(loadSettings().embedding),
+        progress: (text) => process.stdout.write(`\rReading ${text}   `),
+      });
+      markSynced(db, source.id);
+      console.log(`\nRead ${result.rooms} rooms, ${result.messages} messages`);
+    } catch (error) {
+      markSynced(db, source.id, (error as Error).message);
+      throw error;
+    }
+
+    await embedQueue(db);
   }),
 
   cloud: () => withWritableDb(async (db) => {

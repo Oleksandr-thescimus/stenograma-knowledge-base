@@ -4,6 +4,8 @@ import { citedNumbers, formatSource, pickSources, prepareAnswer, type AnswerSour
 import { parseRewrite, rewriteQuestion } from '../../core/answer/rewrite.ts';
 import type { SearchHit } from '../../core/search.ts';
 import { DEFAULT_SETTINGS, type LlmSettings } from '../../core/settings.ts';
+import { saveRoom, setRoomMembers } from '../../core/chat/store.ts';
+import { createRocketChatSource } from '../../core/rocketchat/sync.ts';
 import { findOrCreateSource } from '../../core/sources.ts';
 import { estimateTokens } from '../../core/tokens.ts';
 import { createTestDb, type Db } from './helpers.ts';
@@ -48,6 +50,12 @@ describe('the rewrite (F6)', () => {
     ], today);
 
     expect(JSON.stringify(model.doGenerateCalls[0].prompt)).toContain('User: Що з релізом 2.4?');
+  });
+
+  it('takes a chat room and a ranking by reactions from the question', () => {
+    expect(parseRewrite('{"query": "повідомлення з найбільшою кількістю реакцій", "room": "#qa_dev_talks", "rank": "most reactions"}', 'q'))
+      .toEqual({ query: 'повідомлення з найбільшою кількістю реакцій', room: 'qa_dev_talks', rank: 'reactions' });
+    expect(parseRewrite('{"query": "реліз", "room": null, "rank": "relevance"}', 'q')).toEqual({ query: 'реліз' });
   });
 
   it('reads JSON in a code block', () => {
@@ -113,6 +121,21 @@ describe('the answer\'s context', () => {
     expect(cloud.prompt).not.toContain('Лист про бюджет');
     expect(local.sources.map((source) => source.hit.chunkId)).toEqual([1, 2]);
     expect(local.prompt).toContain('[1] [Meeting · Meeting 1 · 2026-11-02]\nЛист про бюджет');
+  });
+
+  it('lists a chat room\'s members once, with its first source, within the budget', () => {
+    const chat = createRocketChatSource(db, 'olena@chat.example.com', {
+      serverUrl: 'https://chat.example.com', userId: 'u', username: 'olena', selection: { mode: 'all', types: ['channel'] }, since: 0,
+    });
+    saveRoom(db, chat, { id: 'pmo', type: 'channel', name: 'pmo', title: 'PMO' });
+    setRoomMembers(db, chat, 'pmo', ['Taras Bondarenko', 'Olena Koval'], 0);
+    const message = (n: number, text: string): SearchHit => ({
+      ...hit(n, chat, text), documentKind: 'chat', sourceKind: 'rocketchat', threadId: 'pmo', header: '[Rocket.Chat · #PMO · 2026-11-11]',
+    });
+    const { prompt } = prepareAnswer(db, OLLAMA, 'Хто в PMO?', [message(1, 'Olena Koval: Курс почнеться в понеділок'), hit(2, meetings), message(3, 'Olena Koval: Додала всіх')]);
+
+    expect(prompt).toContain('[1] [Rocket.Chat · #PMO · 2026-11-11]\nRoom members (2): Olena Koval, Taras Bondarenko\nOlena Koval: Курс почнеться');
+    expect(prompt.match(/Room members/g)).toHaveLength(1);
   });
 
   it('finds the sources an answer cites', () => {
