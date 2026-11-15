@@ -4,6 +4,8 @@ import { citationOf, citedNumbers, linkCitations, splitCitations } from '../../a
 import { describeStatus } from '../../app/renderer/src/lib/status.ts';
 import { summariesLeftMs, summaryStep } from '../../app/renderer/src/lib/summaries.ts';
 import { citedRange } from '../../app/renderer/src/lib/meeting.ts';
+import { mergeOutside } from '../../app/renderer/src/lib/servers.ts';
+import { DEFAULT_SETTINGS } from '../../core/settings.ts';
 
 describe('citations in an answer', () => {
   it('splits the text around [n]', () => {
@@ -49,14 +51,15 @@ describe('the cited moment of a meeting', () => {
 describe('the sidebar\'s status line', () => {
   const core = (over: Partial<CoreStatus> = {}): CoreStatus => ({
     kbId: 'kb',
+    ai: { lanes: [], answers: null },
     dataDir: '/d',
     sources: [],
     embedding: { model: 'ollama:bge-m3', pending: 0, running: false, error: null, rebuild: null },
-    attachments: { pending: 0, done: 3, failed: 0, running: false, error: null, paused: null },
+    attachments: { pending: 0, done: 3, failed: 0, running: false, error: null, paused: null, images: { pending: 0, servers: [], waiting: null } },
     summaries: {
-      pending: 0, done: 1, running: false, current: null, averageMs: null, tokensPerSecond: null, skipped: 0, error: null, waitingFor: null,
-      retryAt: null,
+      pending: 0, done: 1, running: false, servers: [], skipped: 0, error: null, waiting: null,
     },
+    drafts: { ready: 0, waiting: 0, writing: false, error: null, servers: [], wait: null },
     server: { port: 47321, listening: true, error: null },
     ...over,
   });
@@ -72,29 +75,53 @@ describe('the sidebar\'s status line', () => {
   it('puts a source that needs the user before the work going on, and opens where it\'s fixed', () => {
     const summary = describeStatus(app(core({ sources: [chat], embedding: { ...core().embedding, pending: 40 } })));
 
-    expect(summary).toMatchObject({ tone: 'error', text: 'Rocket.Chat: new token needed', tab: 'sources' });
+    expect(summary).toMatchObject({ tone: 'error', text: 'Rocket.Chat: new token needed', page: 'sources' });
     expect(summary.details).toContain('Rocket.Chat: its token was refused, a new one is needed');
     expect(summary.details).toContain('Indexing: 40 left');
   });
 
   it('shows the work going on, then the paused work, then "Up to date"', () => {
-    expect(describeStatus(app(core({ attachments: { ...core().attachments, pending: 5 } })))).toMatchObject({ tone: 'busy', text: 'Reading images and files: 5 left', tab: 'index' });
+    expect(describeStatus(app(core({ attachments: { ...core().attachments, pending: 5 } })))).toMatchObject({ tone: 'busy', text: 'Reading images and files: 5 left', page: 'activity' });
     expect(describeStatus(app(core({ attachments: { ...core().attachments, pending: 5, paused: { until: null } } }))).text).toBe('Background AI paused');
     expect(describeStatus(app(core()))).toMatchObject({ tone: 'ok', text: 'Up to date' });
   });
 
   it('says how long the waiting summaries take, and not a skipped one as work going on', () => {
-    const summaries = { ...core().summaries, pending: 3, averageMs: 10 * 60_000 };
-    const current = { title: 'Weekly', createdAt: 0, startedAt: 1000, done: 2, all: 5, llm: 'ollama qwen3:8b', local: true };
+    const server = { name: 'This computer', work: null, wait: null, averageMs: 10 * 60_000, tokensPerSecond: null };
+    const summaries = { ...core().summaries, pending: 3, servers: [server] };
+    const work = { title: 'Weekly', detail: null, startedAt: 1000, model: 'qwen3:8b', server: 'This computer', step: { done: 2, all: 5 } };
 
     expect(summariesLeftMs(summaries, 0)).toBe(30 * 60_000);
     // The one being made counts what's left of it
-    expect(summariesLeftMs({ ...summaries, current }, 1000 + (4 * 60_000))).toBe((2 * 10 * 60_000) + (6 * 60_000));
-    expect(summariesLeftMs({ ...summaries, averageMs: null }, 0)).toBeNull();
-    expect(summaryStep(current)).toBe('notes, step 3 of 5');
+    expect(summariesLeftMs({ ...summaries, servers: [{ ...server, work }] }, 1000 + (4 * 60_000))).toBe((2 * 10 * 60_000) + (6 * 60_000));
+    expect(summariesLeftMs({ ...summaries, servers: [{ ...server, averageMs: null }] }, 0)).toBeNull();
+    // Two servers at work together: 10 and 30 minutes a meeting make 4 in 30 minutes
+    expect(summariesLeftMs({ ...summaries, pending: 4, servers: [server, { ...server, name: 'Orange Pi', averageMs: 30 * 60_000 }] }, 0)).toBe(30 * 60_000);
+    expect(summaryStep(work.step)).toBe('notes, step 3 of 5');
     expect(summaryStep({ done: 4, all: 5 })).toBe('writing the summary (step 5 of 5)');
 
     expect(describeStatus(app(core({ summaries }))).text).toBe('Summarizing meetings: 3 left, ~30 min');
     expect(describeStatus(app(core({ summaries: { ...summaries, skipped: 3 } }))).text).toBe('Up to date');
+  });
+});
+
+describe('the settings form', () => {
+  const server = (name: string, queue: boolean) => ({ name, kind: 'ollama' as const, url: `http://127.0.0.1:${name}`, text: 'm', images: '', queue });
+  const settings = (servers: ReturnType<typeof server>[], months = 3) => ({
+    ...DEFAULT_SETTINGS, servers, attachments: { ...DEFAULT_SETTINGS.attachments, months },
+  });
+
+  it('takes a queue turned off elsewhere, and keeps what was edited here for Save', () => {
+    const before = settings([server('1', true), server('2', true)]);
+    // The months edited here; the second server renamed here
+    const form = settings([server('1', true), { ...server('2', true), name: 'Pi' }], 12);
+    // Both queues turned off on Activity
+    const fresh = settings([server('1', false), server('2', false)]);
+
+    const merged = mergeOutside(form, before, fresh);
+    expect(merged.servers.map((one) => [one.name, one.queue])).toEqual([['1', false], ['Pi', true]]);
+    expect(merged.attachments.months).toBe(12);
+    // Servers moved here stay as they are
+    expect(mergeOutside(settings([server('2', true), server('1', true)]), before, fresh).servers.map((one) => one.queue)).toEqual([true, true]);
   });
 });

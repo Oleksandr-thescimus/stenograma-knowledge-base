@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { CalendarClock, Loader2, Plus, Trash2 } from 'lucide-react';
-import type { MeetingSeriesInfo, SeriesMatcher, SeriesSuggestion, SummaryStatus } from '../../../../core/protocol';
+import type { MeetingSeriesInfo, SeriesMatcher, SeriesSuggestion } from '../../../../core/protocol';
 import { Chip } from '@/components/Composer';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -185,7 +185,7 @@ const SuggestionRow = ({ suggestion, series, onName, onAddTo }: {
   );
 };
 
-const MeetingSeriesCard = ({ summaries }: { summaries: SummaryStatus | undefined }) => {
+const MeetingSeriesCard = () => {
   const [data, setData] = useState<{ series: MeetingSeriesInfo[], suggestions: SeriesSuggestion[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -222,15 +222,9 @@ const MeetingSeriesCard = ({ summaries }: { summaries: SummaryStatus | undefined
         <div className="min-w-0 flex-1">
           <h3 className="font-medium">Meeting series</h3>
           <p className="text-sm text-muted-foreground">
-            Recurring meetings keep their Meet code: name them once, and questions such as &quot;what was discussed at the
-            lead meetings last month&quot; are answered from a summary of each.
+            Recurring meetings keep their Meet code. Name them once: the name goes into their titles, and questions such
+            as &quot;what was discussed at the lead meetings last month&quot; are answered from a summary of each.
           </p>
-          {summaries && (summaries.pending > 0 || summaries.running) && (
-            <p className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-              {summaries.running && <Loader2 className="size-3.5 animate-spin" />}
-              Summaries: {summaries.done} made, {summaries.pending} waiting
-            </p>
-          )}
         </div>
         {busy && <Loader2 className="size-4 animate-spin text-muted-foreground" />}
       </div>

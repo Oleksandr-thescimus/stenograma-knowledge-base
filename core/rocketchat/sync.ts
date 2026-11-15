@@ -1,11 +1,12 @@
 import {
   deleteMessages, dropBefore, getRoom, indexAffected, listRooms, markMembersRead, messageIds, noneAffected, reindexRoom, removeRoom,
-  roomsWithReactions, saveMessages, saveRoom, saveUsers, setRoomCursor, setRoomMembers, type Affected, type IndexContext,
+  roomsWithReactions, saveMessages, saveRoom, saveUsers, setRoomCursor, setRoomMembers, setRoomReadAt, type Affected, type IndexContext,
 } from '../chat/store.ts';
-import type { ChatMessage, ChatRoom } from '../chat/types.ts';
+import type { ChatMessage, ChatRoom, RoomChange } from '../chat/types.ts';
 import type { Db } from '../db.ts';
 import type { RoomSelection, SyncLimits } from '../protocol.ts';
 import { findOrCreateSource, findSource } from '../sources.ts';
+import { formatDay } from '../format.ts';
 import { RocketChatError, type RcMessage, type RocketChatApi, type SyncPage } from './api.ts';
 import { isReadableRoom, toChatMessage, toRoom } from './convert.ts';
 
@@ -25,6 +26,8 @@ export interface RocketChatConfig {
   since: number;
   // Missing in a source added before them: the defaults
   limits?: SyncLimits;
+  // When reply drafts were last turned on (sources.replies_enabled)
+  draftsSince?: number;
 }
 
 // Gentle by default: half the calls Rocket.Chat allows from an address, and a pause between files
@@ -110,6 +113,47 @@ const applyUpdated = (db: Db, sourceId: number, since: number, updated: RcMessag
 
 const latest = (values: string[], fallback: number) => values.reduce((max, value) => Math.max(max, Date.parse(value)), fallback);
 
+// How far a room's read is, after each page: its messages read, the latest time reached
+type RoomProgress = (read: number, reached: number) => void;
+
+// "about 3 min", for what's left
+const aboutText = (ms: number) => {
+  const minutes = Math.round(ms / 60_000);
+
+  if (minutes < 1) {
+    return 'under a minute';
+  }
+
+  return minutes < 60 ? `about ${minutes} min` : `about ${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60} min` : ''}`;
+};
+
+// What a room's read has reached, for the source's status: "Team: 3,000 of ~5,400 messages, up to 2025-03-12, about
+// 2 min left". What's left is by the room's count of messages when all of them are read (from the start), else by
+// the time reached of the period; its time, at the pace so far
+export const roomProgressText = (room: { title: string, total: number | null }, read: { messages: number, reached: number, from: number, now: number, startedAt: number }) => {
+  const { messages, reached, from, now, startedAt } = read;
+  const count = messages.toLocaleString('en-US');
+  let done: number | null = null;
+  let text = `${room.title}: ${count} messages`;
+
+  if (room.total && from === 0) {
+    done = Math.min(1, messages / room.total);
+    text = `${room.title}: ${count} of ~${room.total.toLocaleString('en-US')} messages`;
+  } else if (from > 0 && reached > from && now > from) {
+    done = Math.min(1, (reached - from) / (now - from));
+  }
+
+  if (reached > 0) {
+    text += `, up to ${formatDay(reached)}`;
+  }
+
+  if (done !== null && done > 0 && done < 1 && messages > 0) {
+    text += `, ${aboutText(((now - startedAt) * (1 - done)) / done)} left`;
+  }
+
+  return text;
+};
+
 interface RoomRun {
   context: SyncContext;
   config: RocketChatConfig;
@@ -120,7 +164,7 @@ interface RoomRun {
   onMessages: (count: number) => void;
 }
 
-const readRoom = async ({ context, config, legacy, learned, onMessages }: RoomRun, room: ChatRoom, lastMessage: number | null) => {
+const readRoom = async ({ context, config, legacy, learned, onMessages }: RoomRun, room: ChatRoom, lastMessage: number | null, onProgress?: RoomProgress) => {
   const { db, sourceId, api, signal } = context;
   const now = context.now?.() ?? Date.now();
   const before = readCursor(getRoom(db, sourceId, room.id)?.cursor);
@@ -130,6 +174,7 @@ const readRoom = async ({ context, config, legacy, learned, onMessages }: RoomRu
   const seen = new Set<string>();
   let updated = whole ? config.since : before.updated;
   let deleted = whole ? config.since : before.deleted;
+  let read = 0;
 
   const takePage = (page: SyncPage) => {
     page.updated.forEach((message) => seen.add(message._id));
@@ -137,6 +182,12 @@ const readRoom = async ({ context, config, legacy, learned, onMessages }: RoomRu
     deleteMessages(db, sourceId, page.deleted.map((message) => message._id), affected);
     updated = latest(page.updated.map((message) => message._updatedAt), updated);
     deleted = latest(page.deleted.map((message) => message._deletedAt), deleted);
+
+    // A page starts a millisecond back: a message read again counts once
+    if (seen.size > read) {
+      read = seen.size;
+      onProgress?.(read, updated);
+    }
   };
 
   const readPages = async (type: 'UPDATED' | 'DELETED') => {
@@ -198,7 +249,9 @@ export const syncRocketChat = async (context: SyncContext) => {
   const now = context.now?.() ?? Date.now();
   const config = readConfig(db, sourceId);
   const subscriptions = await api.subscriptions();
-  const lastMessages = new Map((await api.rooms()).map((room) => [room._id, room.lm ? Date.parse(room.lm) : null]));
+  const listed = await api.rooms();
+  const lastMessages = new Map(listed.map((room) => [room._id, room.lm ? Date.parse(room.lm) : null]));
+  const totals = new Map(listed.map((room) => [room._id, room.msgs ?? null]));
   const wanted = subscriptions.filter(isReadableRoom).map(toRoom).filter((room) => isSelected(config.selection, room));
   const wantedIds = new Set(wanted.map((room) => room.id));
   let changed = false;
@@ -215,12 +268,16 @@ export const syncRocketChat = async (context: SyncContext) => {
     return !cursor || cursor.lastMessage !== (lastMessages.get(room.id) ?? null) || now - cursor.checkedAt > RECHECK_MS;
   });
 
+  const readAt = new Map(subscriptions.map((subscription) => [subscription.rid, subscription.ls ? Date.parse(subscription.ls) : null]));
+
   for (const room of wanted) {
     if (saveRoom(db, sourceId, room)) {
       // Renamed: every chunk's header names it
       reindexRoom(db, sourceId, room.id, indexContext(config, context.embedModel));
       changed = true;
     }
+
+    setRoomReadAt(db, sourceId, room.id, readAt.get(room.id) ?? null);
   }
 
   let messages = 0;
@@ -228,10 +285,19 @@ export const syncRocketChat = async (context: SyncContext) => {
 
   for (const [index, room] of due.entries()) {
     signal?.throwIfAborted();
-    context.progress?.(`${index} of ${due.length} rooms${messages ? `, ${messages} messages` : ''}`);
+    const rooms = `${index + 1} of ${due.length} rooms`;
+    context.progress?.(`${rooms}${messages ? `, ${messages.toLocaleString('en-US')} messages` : ''}`);
+    const startedAt = Date.now();
+    const known = readCursor(getRoom(db, sourceId, room.id)?.cursor);
+    // Read whole (new, or not read for long): from the period's start; else from its cursor
+    const from = known && now - known.checkedAt <= TRASH_KEPT_MS ? known.updated : config.since;
+    const onProgress: RoomProgress = (read, reached) => context.progress?.(`${rooms} · ${roomProgressText(
+      { title: room.title, total: from === config.since ? totals.get(room.id) ?? null : null },
+      { messages: read, reached, from, now: Date.now(), startedAt },
+    )}`);
 
     // eslint-disable-next-line no-await-in-loop
-    if (await readRoom(run, room, lastMessages.get(room.id) ?? null)) {
+    if (await readRoom(run, room, lastMessages.get(room.id) ?? null, onProgress)) {
       changed = true;
       context.onChange?.();
     }
@@ -278,6 +344,45 @@ export const syncRocketChat = async (context: SyncContext) => {
   }
 
   return { changed, rooms: due.length, messages };
+};
+
+// Only the rooms the realtime API said changed (realtime.ts), without listing them all: a new message is read in a call
+// or two. A room not kept yet (new, or just chosen) needs the whole sync, which lists the rooms: `unknown` says so
+export const syncRooms = async (context: SyncContext, changes: RoomChange[]) => {
+  const { db, sourceId, signal } = context;
+  const config = readConfig(db, sourceId);
+  const run: RoomRun = { context, config, legacy: { value: false }, learned: { count: 0 }, onMessages: () => undefined };
+  let messages = 0;
+  let changed = false;
+  let unknown = false;
+  run.onMessages = (count) => (messages += count);
+
+  for (const change of changes) {
+    signal?.throwIfAborted();
+    const room = getRoom(db, sourceId, change.roomId);
+
+    if (!room) {
+      unknown = true;
+      continue;
+    }
+
+    if (change.readAt !== undefined) {
+      setRoomReadAt(db, sourceId, room.id, change.readAt);
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    if (await readRoom(run, room, change.lastMessage ?? readCursor(room.cursor)?.lastMessage ?? null)) {
+      changed = true;
+      context.onChange?.();
+    }
+  }
+
+  if (run.learned.count) {
+    roomsWithReactions(db, sourceId).forEach((roomId) => reindexRoom(db, sourceId, roomId, indexContext(config, context.embedModel)));
+    changed = true;
+  }
+
+  return { changed, rooms: changes.length, messages, unknown };
 };
 
 // The token is in the keyring under the knowledge base's id too, so a test's or another knowledge base's source never

@@ -16,8 +16,9 @@ interface Deleted {
   _deletedAt: string;
 }
 
-export const createFakeRocketChat = ({ legacy = false } = {}) => {
-  let clock = START;
+// start: the server's clock, START unless set (now, for what's measured from the real clock)
+export const createFakeRocketChat = ({ legacy = false, start = START } = {}) => {
+  let clock = start;
   const subscriptions: RcSubscription[] = [];
   const messages = new Map<string, RcMessage>();
   const deleted: Deleted[] = [];
@@ -81,7 +82,11 @@ export const createFakeRocketChat = ({ legacy = false } = {}) => {
       case 'rooms.get':
         return json({
           update: subscriptions.map((subscription) => ({
-            _id: subscription.rid, t: subscription.t, lm: lastMessageOf(subscription.rid), usersCount: (members.get(subscription.rid) ?? [USER, ANDRII]).length,
+            _id: subscription.rid,
+            t: subscription.t,
+            lm: lastMessageOf(subscription.rid),
+            msgs: [...messages.values()].filter((message) => message.rid === subscription.rid).length,
+            usersCount: (members.get(subscription.rid) ?? [USER, ANDRII]).length,
           })),
           remove: [],
           success: true,
@@ -139,6 +144,10 @@ export const createFakeRocketChat = ({ legacy = false } = {}) => {
     },
     addRoom: (rid: string, t: 'c' | 'p' | 'd' | 'l', name: string, fname?: string) => {
       subscriptions.push({ _id: `s-${rid}`, rid, t, name, ...(fname && { fname }) });
+    },
+    // The user reads the room in Rocket.Chat
+    read: (rid: string) => {
+      subscriptions.find((subscription) => subscription.rid === rid)!.ls = new Date(clock).toISOString();
     },
     renameRoom: (rid: string, fname: string) => {
       subscriptions.find((subscription) => subscription.rid === rid)!.fname = fname;

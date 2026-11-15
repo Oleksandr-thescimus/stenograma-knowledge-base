@@ -7,15 +7,16 @@ import { summariesLeftMs } from './summaries';
 // the whole state, and a click opens where it's seen and fixed. A routine sync isn't shown: it would blink every few
 // minutes
 
-export type SourcesTab = 'sources' | 'series' | 'index';
+// The page a click opens: Sources for a source to fix, else Activity
+export type StatusPage = 'sources' | 'activity';
 
 export type Tone = 'ok' | 'busy' | 'idle' | 'error';
 
 export interface StatusSummary {
   tone: Tone;
   text: string;
-  // The Sources page's tab it opens; null for the core not running, which the banner shows
-  tab: SourcesTab | null;
+  // The page it opens; null for the core not running, which the banner shows
+  page: StatusPage | null;
   // The whole state, a line each
   details: string[];
 }
@@ -49,6 +50,7 @@ const detailsOf = (core: CoreStatus) => {
 
   return [
     ...failedSources(core).map((source) => `${sourceName(source)}: ${problemText(source)}`),
+    ...core.ai.lanes.filter((lane) => lane.takes.length > 0 && lane.reachable === false).map((lane) => `${lane.name}: not reached`),
     embedding.pending > 0
       ? `Indexing: ${left(embedding.pending)}${embedding.error ? ', stopped by an error' : ''}`
       : 'Index: up to date',
@@ -57,6 +59,8 @@ const detailsOf = (core: CoreStatus) => {
       + `${attachments.failed ? `, ${attachments.failed.toLocaleString()} not read` : ''}${attachments.error ? ', stopped by an error' : ''}`,
     `Meeting summaries: ${summaries.done.toLocaleString()} made, ${summaries.pending.toLocaleString()} waiting`
       + `${summaries.skipped ? `, ${summaries.skipped.toLocaleString()} skipped` : ''}${summaryLeft(summaries)}`,
+    (core.drafts.ready > 0 || core.drafts.waiting > 0)
+      && `Reply drafts: ${core.drafts.ready.toLocaleString()} to review, ${core.drafts.waiting.toLocaleString()} waiting`,
     attachments.paused && `Background AI paused ${attachments.paused.until ? `until ${formatWhen(attachments.paused.until)}` : 'until resumed'}`,
     server.listening ? `The extension sends to port ${server.port}` : 'The extension can\'t send',
   ].filter((line): line is string => Boolean(line));
@@ -69,58 +73,58 @@ const headlineOf = (core: CoreStatus): Omit<StatusSummary, 'details'> => {
   const paused = Boolean(attachments.paused);
 
   if (failed.length === 1) {
-    return { tone: 'error', text: `${sourceName(failed[0])}: ${problemText(failed[0], true)}`, tab: 'sources' };
+    return { tone: 'error', text: `${sourceName(failed[0])}: ${problemText(failed[0], true)}`, page: 'sources' };
   }
 
   if (failed.length > 1) {
-    return { tone: 'error', text: `${failed.length} sources not syncing`, tab: 'sources' };
+    return { tone: 'error', text: `${failed.length} sources not syncing`, page: 'sources' };
   }
 
   if (!server.listening) {
-    return { tone: 'error', text: 'The extension can\'t send', tab: 'index' };
+    return { tone: 'error', text: 'The extension can\'t send', page: 'activity' };
   }
 
   if (embedding.error && embedding.pending > 0) {
-    return { tone: 'error', text: 'Indexing stopped by an error', tab: 'index' };
+    return { tone: 'error', text: 'Indexing stopped by an error', page: 'activity' };
   }
 
   if (attachments.error && attachments.pending > 0 && !paused) {
-    return { tone: 'error', text: 'Reading images stopped by an error', tab: 'index' };
+    return { tone: 'error', text: 'Reading images stopped by an error', page: 'activity' };
   }
 
   if (embedding.pending > 0) {
-    return { tone: 'busy', text: `Indexing: ${left(embedding.pending)}`, tab: 'index' };
+    return { tone: 'busy', text: `Indexing: ${left(embedding.pending)}`, page: 'activity' };
   }
 
   if (embedding.rebuild) {
     const { pending, total } = embedding.rebuild;
 
-    return { tone: 'busy', text: `Building the new index: ${Math.floor(((total - pending) / Math.max(total, 1)) * 100)}%`, tab: 'index' };
+    return { tone: 'busy', text: `Building the new index: ${Math.floor(((total - pending) / Math.max(total, 1)) * 100)}%`, page: 'activity' };
   }
 
   if (attachments.pending > 0 && !paused) {
-    return { tone: 'busy', text: `Reading images and files: ${left(attachments.pending)}`, tab: 'index' };
+    return { tone: 'busy', text: `Reading images and files: ${left(attachments.pending)}`, page: 'activity' };
   }
 
   // A meeting skipped after a failure waits for a restart, not for work going on
   if (summaries.pending > summaries.skipped && !paused) {
-    return { tone: 'busy', text: `Summarizing meetings: ${left(summaries.pending)}${summaryLeft(summaries)}`, tab: 'index' };
+    return { tone: 'busy', text: `Summarizing meetings: ${left(summaries.pending)}${summaryLeft(summaries)}`, page: 'activity' };
   }
 
   if (paused && attachments.pending + summaries.pending > 0) {
-    return { tone: 'idle', text: 'Background AI paused', tab: 'index' };
+    return { tone: 'idle', text: 'Background AI paused', page: 'activity' };
   }
 
-  return { tone: 'ok', text: 'Up to date', tab: 'sources' };
+  return { tone: 'ok', text: 'Up to date', page: 'activity' };
 };
 
 export const describeStatus = (status: AppStatus | null): StatusSummary => {
   if (!status || status.process.state === 'starting') {
-    return { tone: 'busy', text: 'Starting…', tab: null, details: [] };
+    return { tone: 'busy', text: 'Starting…', page: null, details: [] };
   }
 
   if (status.process.state !== 'running' || !status.core) {
-    return { tone: 'error', text: 'Not running', tab: null, details: [] };
+    return { tone: 'error', text: 'Not running', page: null, details: [] };
   }
 
   return { ...headlineOf(status.core), details: detailsOf(status.core) };

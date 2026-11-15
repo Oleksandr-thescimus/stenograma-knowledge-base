@@ -3,11 +3,11 @@ import { chunkConversation } from '../../core/chat/chunk.ts';
 import { findRooms, getConversation, topReacted } from '../../core/chat/store.ts';
 import type { ChatMessage } from '../../core/chat/types.ts';
 import { formatChunkStart, formatDay } from '../../core/format.ts';
-import { createRocketChatApi } from '../../core/rocketchat/api.ts';
+import { createApiLimits, createRocketChatApi } from '../../core/rocketchat/api.ts';
 import { createRocketChatConnector } from '../../core/rocketchat/connector.ts';
 import { toChatMessage } from '../../core/rocketchat/convert.ts';
 import {
-  changePeriod, createRocketChatSource, messageLink, readConfig, syncRocketChat, writeConfig, type RocketChatConfig,
+  changePeriod, createRocketChatSource, messageLink, readConfig, roomProgressText, syncRocketChat, writeConfig, type RocketChatConfig,
 } from '../../core/rocketchat/sync.ts';
 import { search } from '../../core/search.ts';
 import { listSources, removeSource } from '../../core/sources.ts';
@@ -175,11 +175,29 @@ describe('syncing Rocket.Chat (F3, F4)', () => {
     expect(chunksOf(day('team'))[0].text).toBe('Andrii Melnyk: Реліз у пʼятницю');
   });
 
-  it('reads a room in pages', async () => {
+  it('reads a room in pages, telling how far it is', async () => {
     Array.from({ length: 25 }, (_, n) => server.post('general', `p${n}`, `Повідомлення ${n}`));
-    await sync({ pageSize: 10 });
+    const progress: string[] = [];
+    const api = createRocketChatApi({ serverUrl: SERVER, userId: USER._id, token: TOKEN }, { fetch: server.fetch });
+    await syncRocketChat({ db, sourceId, api, embedModel: null, now: server.now, pageSize: 10, progress: (text) => progress.push(text) });
 
     expect(chunksOf(day('general')).map((chunk) => chunk.text).join('\n').split('\n')).toHaveLength(25);
+    // Each page: of the room's count of messages, up to its day
+    expect(progress.join('\n')).toContain(`· general: 10 of ~25 messages, up to ${formatDay(server.now())}`);
+    expect(progress.join('\n')).toContain(`· general: 25 of ~25 messages, up to ${formatDay(server.now())}`);
+  });
+
+  it('tells what\'s left of a room\'s read, by its count of messages or by the time reached of the period', () => {
+    const day = Date.parse('2026-03-01T12:00:00Z');
+    const read = { messages: 3000, reached: day, from: 0, now: day + 1000, startedAt: day + 1000 - 60_000 };
+
+    expect(roomProgressText({ title: 'Team', total: 5000 }, read)).toBe(`Team: 3,000 of ~5,000 messages, up to ${formatDay(day)}, about 1 min left`);
+    // A year from the period's start, three quarters of it read in 3 minutes
+    const year = 365 * 86_400_000;
+    expect(roomProgressText({ title: 'Team', total: null }, {
+      messages: 900, reached: day, from: day - (0.75 * year), now: day + (0.25 * year), startedAt: day + (0.25 * year) - (3 * 60_000),
+    })).toBe(`Team: 900 messages, up to ${formatDay(day)}, about 1 min left`);
+    expect(roomProgressText({ title: 'Team', total: null }, { ...read, messages: 0, reached: 0 })).toBe('Team: 0 messages');
   });
 
   it('reads a server before 7.1 at once', async () => {
@@ -375,6 +393,17 @@ describe('syncing Rocket.Chat (F3, F4)', () => {
 
     // The third call of an endpoint waits out the minute; another endpoint has its own
     expect(waits).toEqual([60_000]);
+
+    // A run's client after another's, as while live, counts the calls of both
+    const limits = createApiLimits();
+    const options = { fetch: server.fetch, requestsPerMinute: 2, limits, now: () => now, wait: async (ms: number) => {
+      waits.push(ms);
+      now += ms;
+    } };
+    await createRocketChatApi({ serverUrl: SERVER, userId: USER._id, token: TOKEN }, options).me();
+    await createRocketChatApi({ serverUrl: SERVER, userId: USER._id, token: TOKEN }, options).me();
+    await createRocketChatApi({ serverUrl: SERVER, userId: USER._id, token: TOKEN }, options).me();
+    expect(waits).toEqual([60_000, 60_000]);
 
     const connector = createRocketChatConnector({ db, getToken: () => TOKEN, embedModel: () => null, fetch: server.fetch });
     expect(connector.intervalMs(sourceId)).toBe(5 * 60_000);

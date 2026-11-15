@@ -9,9 +9,13 @@ import { embeddingModelId } from '../../core/embed/provider.ts';
 import type { AskPart, CoreEvent, RewriteFilter, Settings } from '../../core/protocol.ts';
 import { createKbService, type KbService, type ServiceOptions } from '../../core/service.ts';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, type LlmSettings } from '../../core/settings.ts';
+import { answersLlm } from '../../core/servers.ts';
 import { createFakeProvider } from './helpers.ts';
 import { tinyPdf } from './pdf.ts';
 import { createFakeRocketChat, SERVER, TOKEN, USER } from './rocketchat-fake.ts';
+
+// The chat's model of the default settings: this computer's Ollama
+const DEFAULT_LLM = answersLlm(DEFAULT_SETTINGS);
 
 // The core as the app runs it (core/service.ts), on a knowledge base in a temporary directory: the extension's contract
 // fixture pushed over HTTP, a fake embedding model and a mock LLM
@@ -181,7 +185,9 @@ describe('the core service', () => {
   });
 
   it('answers in parts: the request, the sources, the text', async () => {
-    const { service } = await startWithMeetings();
+    const { service, sourceId } = await startWithMeetings();
+    // A meeting not summarized yet says so in the statistics' list of calls
+    expect(await service.invoke('aiCallResult', { item: `meeting:${sourceId}:${MEETING}` })).toEqual({ kind: 'none', reason: 'waiting' });
     const { parts } = await askParts(service, 'a1', { question: 'Що з бюджетом?' });
 
     expect(parts[0]).toEqual({ kind: 'request', query: 'бюджет' });
@@ -189,6 +195,21 @@ describe('the core service', () => {
     expect((parts[1] as Extract<AskPart, { kind: 'sources' }>).sources.length).toBeGreaterThan(0);
     expect(parts.filter((part) => part.kind === 'text').map((part) => part.text).join('')).toBe('Бюджет затвердили [1].');
     expect(parts.at(-1)).toEqual({ kind: 'done' });
+
+    // Its calls are kept for the statistics: the rewrite, the question embedded for the search, the answer streamed;
+    // listed by the question, whose answer opens its chat
+    const [group] = await service.invoke('aiCalls', { since: null, task: 'answer' });
+    expect(group).toMatchObject({ task: 'answer', title: 'Що з бюджетом?', calls: 2 });
+    expect(await service.invoke('aiCallResult', { item: group.item })).toMatchObject({
+      kind: 'answer', question: 'Що з бюджетом?', text: 'Бюджет затвердили [1].', chatId: expect.any(Number),
+    });
+    expect(await service.invoke('aiCallResult', { item: 'draft:999' })).toBeNull();
+    const { tasks } = await service.invoke('aiUsage', { since: null });
+    const of = (task: string) => tasks.find((row) => row.task === task);
+    expect(of('rewrite')).toMatchObject({ calls: 1, inputTokens: 1, outputTokens: 1, errors: 0, background: 0 });
+    expect(of('answer')).toMatchObject({ calls: 1, inputTokens: 1, outputTokens: 1, errors: 0, background: 0 });
+    expect(of('search')).toMatchObject({ calls: 1, items: 1, errors: 0, background: 0 });
+    expect(of('embedding')).toMatchObject({ background: expect.any(Number), errors: 0 });
   });
 
   it('lets the filters set by hand win over the rewrite\'s, and says when nothing answers', async () => {
@@ -215,6 +236,10 @@ describe('the core service', () => {
     const { parts } = await askParts(service, 'a3', { question: 'бюджет' });
 
     expect(parts.at(-1)).toEqual({ kind: 'error', message: expect.stringContaining('Ollama isn\'t running') });
+    // The failed calls are kept as such (an error that isn't a provider's isn't tried again)
+    const { tasks } = await service.invoke('aiUsage', { since: null });
+    expect(tasks.filter((row) => ['rewrite', 'answer'].includes(row.task)).map(({ task, calls, errors }) => ({ task, calls, errors })))
+      .toEqual(expect.arrayContaining([{ task: 'rewrite', calls: 1, errors: 1 }, { task: 'answer', calls: 1, errors: 1 }]));
   });
 
   it('keeps each chat with its answers, and completes a follow-up question with the chat\'s last exchanges', async () => {
@@ -284,7 +309,9 @@ describe('the core service', () => {
 
   it('summarizes a meeting that may not go to cloud AI with Ollama, when a cloud LLM is chosen (F8)', async () => {
     const { service, sourceId } = await startWithMeetings();
-    saveSettings({ ...loadSettings(), llm: { ...DEFAULT_SETTINGS.llm, provider: 'groq', model: 'openai/gpt-oss-120b' } });
+    // Groq first in the list: it answers, and summarizes what asks for it
+    const servers = loadSettings().servers.map((server) => (server.kind === 'groq' ? { ...server, text: 'openai/gpt-oss-120b' } : server));
+    saveSettings({ ...loadSettings(), servers: [servers.find((server) => server.kind === 'groq')!, ...servers.filter((server) => server.kind !== 'groq')] });
 
     await summaryParts(service, 's2', sourceId);
 
@@ -293,7 +320,7 @@ describe('the core service', () => {
     await service.invoke('setCloudAllowed', { sourceId, allowed: false });
     const parts = await summaryParts(service, 's3', sourceId);
 
-    expect(llms.at(-1)).toEqual({ provider: 'ollama', model: 'qwen3.5:9b', ollamaUrl: DEFAULT_SETTINGS.llm.ollamaUrl });
+    expect(llms.at(-1)).toEqual({ provider: 'ollama', model: 'qwen3.5:9b', ollamaUrl: DEFAULT_LLM.ollamaUrl });
     expect(parts[0]).toMatchObject({ kind: 'progress', llm: 'ollama qwen3.5:9b', local: true });
   });
 
@@ -410,7 +437,9 @@ describe('the core service', () => {
     const service = await startService();
 
     await expect(service.invoke('saveSettings', { ...DEFAULT_SETTINGS, server: { port: 80 } })).rejects.toThrow();
-    await expect(service.invoke('saveSettings', { ...DEFAULT_SETTINGS, llm: { ...DEFAULT_SETTINGS.llm, model: ' ' } })).rejects.toThrow();
+    // An Ollama server without its address, or the same server twice
+    await expect(service.invoke('saveSettings', { ...DEFAULT_SETTINGS, servers: [{ ...DEFAULT_SETTINGS.servers[0], url: '' }] })).rejects.toThrow();
+    await expect(service.invoke('saveSettings', { ...DEFAULT_SETTINGS, servers: [DEFAULT_SETTINGS.servers[0], DEFAULT_SETTINGS.servers[0]] })).rejects.toThrow();
     expect(loadSettings().server.port).toBe(port);
   });
 
@@ -492,6 +521,102 @@ describe('the core service', () => {
     await vi.waitFor(async () => expect(await source()).toMatchObject({ lastError: null, connector: { running: false, problem: null } }));
   });
 
+  it('drafts replies to the messages to the user once turned on, and closes a draft answered in Rocket.Chat', async () => {
+    model = mockModel('Так, бюджет погодили [1].', []);
+    const server = createFakeRocketChat({ start: Date.now() - 3_600_000 });
+    server.addRoom('general', 'c', 'general');
+    server.addRoom('dm-andrii', 'd', 'andrii', 'Andrii Melnyk');
+    server.post('general', 'm1', 'Всім привіт');
+    server.post('general', 'm2', '@olena бюджет погодили?', { mentions: [{ _id: USER._id, username: USER.username }] });
+    server.post('dm-andrii', 'm3', 'Скинь звіт, будь ласка');
+    const secrets = new Map<string, string>();
+    const service = makeService({
+      fetch: server.fetch,
+      secrets: { get: (name) => secrets.get(name), set: (name, value) => secrets.set(name, value), delete: (name) => secrets.delete(name) },
+    });
+    await service.start();
+    const { sourceId } = await service.invoke('addRocketChat', {
+      serverUrl: SERVER, userId: USER._id, token: TOKEN, selection: { mode: 'chosen', ids: ['general', 'dm-andrii'] }, since: 0, limits: FAST,
+    });
+    const source = async () => (await service.invoke('status', {})).sources.find((candidate) => candidate.id === sourceId);
+    await vi.waitFor(async () => expect(await source()).toMatchObject({ lastSyncAt: expect.any(Number), connector: { running: false } }));
+
+    expect(await service.invoke('drafts', {})).toEqual([]);
+
+    await service.invoke('setRepliesEnabled', { sourceId, enabled: true });
+    await vi.waitFor(async () => expect((await service.invoke('status', {})).drafts).toMatchObject({ ready: 2, waiting: 0 }), { timeout: 5000 });
+    const drafts = await service.invoke('drafts', {});
+
+    expect(drafts.map(({ conversation, reason, state, text }) => ({ conversation, reason, state, text })).sort((a, b) => a.reason.localeCompare(b.reason)))
+      .toEqual([
+        { conversation: 'direct: Andrii Melnyk', reason: 'direct', state: 'ready', text: 'Так, бюджет погодили [1].' },
+        { conversation: '#general', reason: 'mention', state: 'ready', text: 'Так, бюджет погодили [1].' },
+      ]);
+    expect(drafts.find((draft) => draft.reason === 'mention')!.messages.map((message) => message.text)).toEqual(['Всім привіт', '@olena бюджет погодили?']);
+
+    // Answered in Rocket.Chat: gone after the next sync
+    server.post('general', 'm4', 'Так, погодили', { author: { username: USER.username, name: USER.name } });
+    await service.invoke('syncSource', { sourceId });
+    await vi.waitFor(async () => expect((await service.invoke('drafts', {})).map((draft) => draft.reason)).toEqual(['direct']));
+
+    const [direct] = await service.invoke('drafts', {});
+    await service.invoke('draftAction', { draftId: direct.id, action: 'dismiss' });
+    expect(await service.invoke('drafts', {})).toEqual([]);
+    expect((await service.invoke('status', {})).drafts).toMatchObject({ ready: 0, waiting: 0 });
+
+    // Asked for by hand, though answered: #general's last message from someone else
+    const conversations = await service.invoke('draftableConversations', {});
+    expect(conversations.map(({ conversation, last, drafted }) => [conversation, last.text, drafted]))
+      .toEqual([['direct: Andrii Melnyk', 'Скинь звіт, будь ласка', false], ['#general', '@olena бюджет погодили?', false]]);
+
+    await service.invoke('requestDraft', { sourceId, roomId: 'general', threadId: null });
+    await vi.waitFor(async () => expect((await service.invoke('drafts', {})).map(({ reason, state }) => [reason, state])).toEqual([['manual', 'ready']]));
+  });
+
+  it('writes while the background work is paused only the drafts the user asked for, and keeps the pause out of the settings form', async () => {
+    model = mockModel('Скину ввечері.', []);
+    const server = createFakeRocketChat({ start: Date.now() - 3_600_000 });
+    server.addRoom('dm-andrii', 'd', 'andrii', 'Andrii Melnyk');
+    server.post('dm-andrii', 'm1', 'Скинь звіт, будь ласка');
+    const secrets = new Map<string, string>();
+    const service = makeService({
+      fetch: server.fetch,
+      secrets: { get: (name) => secrets.get(name), set: (name, value) => secrets.set(name, value), delete: (name) => secrets.delete(name) },
+    });
+    await service.start();
+    const { sourceId } = await service.invoke('addRocketChat', {
+      serverUrl: SERVER, userId: USER._id, token: TOKEN, selection: { mode: 'chosen', ids: ['dm-andrii'] }, since: 0, limits: FAST,
+    });
+    await vi.waitFor(async () => expect((await service.invoke('status', {})).sources[0]).toMatchObject({ lastSyncAt: expect.any(Number) }));
+
+    await service.invoke('pauseBackground', { minutes: 60 });
+    expect(await service.invoke('getSettings', {})).not.toHaveProperty('backgroundPaused');
+
+    await service.invoke('setRepliesEnabled', { sourceId, enabled: true });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const [waiting] = await service.invoke('drafts', {});
+    expect(waiting).toMatchObject({ reason: 'direct', state: 'waiting', asked: false });
+
+    await service.invoke('draftAction', { draftId: waiting.id, action: 'rewrite' });
+    await vi.waitFor(async () => expect((await service.invoke('drafts', {}))[0]).toMatchObject({ state: 'ready', text: 'Скину ввечері.', asked: true }));
+  });
+
+  it('tries a summary model on a meeting without keeping it, and only Ollama for a source that may not go to cloud AI', async () => {
+    model = mockModel('{}', ['- Погодили ', 'бюджет']);
+    const { service, sourceId } = await startWithMeetings();
+    const [meeting] = await service.invoke('summaryTryMeetings', {});
+    expect(meeting).toMatchObject({ sourceId, lines: expect.any(Number), saved: null });
+
+    const params = { tryId: 't1', sourceId, sessionId: meeting.sessionId };
+    const tried = await service.invoke('trySummary', { ...params, llm: DEFAULT_LLM });
+    expect(tried).toMatchObject({ llm: `ollama ${DEFAULT_LLM.model}`, local: true, text: '- Погодили бюджет', calls: 1, ms: expect.any(Number) });
+    expect((await service.invoke('summaryTryMeetings', {}))[0].saved).toBeNull();
+
+    await service.invoke('setCloudAllowed', { sourceId, allowed: false });
+    await expect(service.invoke('trySummary', { ...params, tryId: 't2', llm: { ...DEFAULT_LLM, provider: 'groq', model: 'openai/gpt-oss-120b' } }))
+      .rejects.toThrow('may not go to cloud AI');
+  });
+
   it('keeps a browser\'s browser as chosen, else guesses it from its label, and renames it', async () => {
     const { service, sourceId } = await startWithMeetings();
     const { sourceId: other } = await service.invoke('addBrowser', { label: 'Work laptop', browser: 'brave' });
@@ -514,7 +639,7 @@ describe('the core service', () => {
     const PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 
     // Rocket.Chat with an image, a PDF and an archive in #general, files of any time read
-    const startWithFiles = async (onFetch?: (url: string) => void) => {
+    const startWithFiles = async (onFetch?: (url: string) => void, answer?: (url: string) => Response | undefined) => {
       saveSettings({ ...DEFAULT_SETTINGS, server: { port }, attachments: { ...DEFAULT_SETTINGS.attachments, months: 0 } });
       const server = createFakeRocketChat();
       server.addRoom('general', 'c', 'general');
@@ -523,10 +648,10 @@ describe('the core service', () => {
       server.upload('general', 'm3', 'Архів', { id: 'f3', name: 'logs.zip', type: 'application/zip', bytes: PNG });
       const secrets = new Map<string, string>();
       const service = makeService({
-        fetch: (input, init) => {
+        fetch: async (input, init) => {
           onFetch?.(String(input));
 
-          return server.fetch(input, init);
+          return answer?.(String(input)) ?? server.fetch(input, init);
         },
         secrets: { get: (name) => secrets.get(name), set: (name, value) => secrets.set(name, value), delete: (name) => secrets.delete(name) },
       });
@@ -545,6 +670,10 @@ describe('the core service', () => {
       const { service, sourceId } = await startWithFiles();
 
       await vi.waitFor(async () => expect((await service.invoke('status', {})).attachments).toMatchObject({ done: 2, pending: 0, running: false }), { timeout: 5000 });
+      // The image's time, for the average of the server's model
+      expect((await service.invoke('status', {})).attachments.images).toMatchObject({
+        pending: 0, servers: [{ name: 'This computer', work: null, wait: null, averageMs: expect.any(Number) }], waiting: null,
+      });
 
       const day = `chat:${sourceId}:general:2026-11-10`;
       const messages = await chunkTexts(service, day);
@@ -573,14 +702,32 @@ describe('the core service', () => {
       expect(await service.invoke('attachmentImage', { sourceId, fileId: 'f1' })).toBe(`data:image/png;base64,${Buffer.from(PNG).toString('base64')}`);
 
       expect(await service.invoke('recentImages', {})).toEqual([{ sourceId, fileId: 'f1', name: 'screen.png', ts: expect.any(Number), room: '#general' }]);
-      const tried = await service.invoke('tryImageModel', { sourceId, fileId: 'f1', model: { provider: 'ollama', model: 'gemma3:4b', ollamaUrl: DEFAULT_SETTINGS.attachments.ollamaUrl } });
+      const tried = await service.invoke('tryImageModel', { sourceId, fileId: 'f1', model: { provider: 'ollama', model: 'gemma3:4b', ollamaUrl: DEFAULT_LLM.ollamaUrl } });
       expect(tried).toMatchObject({ description: 'Скріншот помилки сервера', model: 'ollama gemma3:4b' });
       // F8: the chat may not go to cloud AI
-      await expect(service.invoke('tryImageModel', { sourceId, fileId: 'f1', model: { provider: 'gemini', model: 'gemini-2.5-flash', ollamaUrl: DEFAULT_SETTINGS.attachments.ollamaUrl } }))
+      await expect(service.invoke('tryImageModel', { sourceId, fileId: 'f1', model: { provider: 'gemini', model: 'gemini-2.5-flash', ollamaUrl: DEFAULT_LLM.ollamaUrl } }))
         .rejects.toThrow('may not go to cloud AI');
 
       expect(await service.invoke('readImagesAgain', {})).toEqual({ images: 1 });
       await vi.waitFor(async () => expect((await service.invoke('status', {})).attachments).toMatchObject({ done: 2, pending: 0, running: false }), { timeout: 5000 });
+    });
+
+    it('says a model that doesn\'t read images can\'t, leaving the images waiting and the documents read', async () => {
+      // As an Orange Pi's RKLLama says of its text models
+      const { service, sourceId } = await startWithFiles(undefined, (url) => (url.endsWith('/api/show') ? Response.json({ capabilities: ['completion'] }) : undefined));
+
+      await vi.waitFor(async () => expect((await service.invoke('status', {})).attachments).toMatchObject({
+        done: 1, pending: 1, failed: 0, error: expect.stringContaining('doesn\'t read images'),
+      }), { timeout: 4000 });
+      // The Activity page says why the image waits, and that it waits for this computer
+      const { attachments, ai } = await service.invoke('status', {});
+      const noVision = { reason: 'noVision', server: 'This computer', retryAt: expect.any(Number) };
+      expect(attachments.images).toMatchObject({ pending: 1, servers: [{ name: 'This computer', work: null, wait: noVision }], waiting: noVision });
+      expect(ai.lanes[0]).toMatchObject({
+        name: 'This computer', id: DEFAULT_LLM.ollamaUrl, now: null, asked: false, retryAt: null, queue: true, takes: ['drafts', 'images', 'summaries'],
+      });
+      await expect(service.invoke('tryImageModel', { sourceId, fileId: 'f1', model: DEFAULT_LLM }))
+        .rejects.toThrow('qwen3.5:9b on This computer doesn\'t read images');
     });
 
     it('waits while the vision model isn\'t there, without counting it against the file', async () => {
@@ -625,7 +772,7 @@ describe('the core service', () => {
   });
 
   it('asks with a chat\'s own model, kept with the chat, and lists the models to choose from', async () => {
-    const {ollamaUrl} = DEFAULT_SETTINGS.llm;
+    const {ollamaUrl} = DEFAULT_LLM;
     const ollama: typeof fetch = async (input, init) => {
       const url = String(input);
 
@@ -642,9 +789,12 @@ describe('the core service', () => {
     await service.start();
 
     // Neither the embedding model nor the reranker; no Groq or Gemini without their key
-    expect(await service.invoke('chatModels', {})).toEqual([
-      { provider: 'ollama', model: 'qwen3.5:9b', local: true }, { provider: 'ollama', model: 'gemma3:4b', local: true },
-    ]);
+    const here = { provider: 'ollama' as const, ollamaUrl, server: 'This computer', local: true };
+    expect(await service.invoke('chatModels', {})).toEqual([{ ...here, model: 'qwen3.5:9b' }, { ...here, model: 'gemma3:4b' }]);
+    // The embedding models: only Ollama's that embed, and none of Gemini's without its key; the vision models: those
+    // that say they read images
+    expect(await service.invoke('taskModels', { task: 'embeddings' })).toEqual([{ ...here, model: 'bge-m3' }]);
+    expect(await service.invoke('taskModels', { task: 'images' })).toEqual([{ ...here, model: 'gemma3:4b' }, { ...here, model: 'qwen3.5:9b' }]);
 
     const gemma = { provider: 'ollama' as const, model: 'gemma3:4b', ollamaUrl };
     const { chatId, parts } = await askParts(service, 'm1', { question: 'Що з бюджетом?', llm: gemma });
@@ -652,6 +802,206 @@ describe('the core service', () => {
     expect(llms.at(-1)).toEqual(gemma);
     expect(parts.find((part) => part.kind === 'sources')).toMatchObject({ llm: 'ollama gemma3:4b', local: true });
     expect((await service.invoke('chat', { chatId }))?.llm).toEqual(gemma);
+
+    // Its calls are kept by the model and server that made them
+    expect((await service.invoke('aiUsage', { since: null })).models)
+      .toContainEqual(expect.objectContaining({ provider: 'ollama', model: 'gemma3:4b', server: 'This computer' }));
+  });
+
+  it('lists every server\'s models, answers on the next server when the first isn\'t reached, and turns a queue off', async () => {
+    const PI = 'http://127.0.0.1:11435';
+    let piUp = true;
+    const servers: typeof fetch = async (input) => {
+      const url = String(input);
+
+      if (url.startsWith(PI) && !piUp) {
+        throw new TypeError('fetch failed');
+      }
+
+      if (url.endsWith('/api/version')) {
+        return Response.json({ version: '0.1' });
+      }
+
+      if (url.endsWith('/api/tags')) {
+        return Response.json({ models: [{ name: url.startsWith(PI) ? 'qwen3.5-4b' : 'qwen3.5:9b' }] });
+      }
+
+      return Response.json({ capabilities: ['completion'] });
+    };
+    // The Orange Pi first: it answers the chat
+    const orangePi = { name: 'Orange Pi', kind: 'ollama' as const, url: PI, text: 'qwen3.5-4b', images: '', queue: true };
+    saveSettings({ ...loadSettings(), servers: [orangePi, ...DEFAULT_SETTINGS.servers] });
+    const service = makeService({ fetch: servers, secrets: { get: () => undefined, set: () => undefined, delete: () => undefined } });
+    await service.start();
+
+    expect((await service.invoke('chatModels', {})).map((choice) => `${choice.server} ${choice.model}`)).toEqual(['Orange Pi qwen3.5-4b', 'This computer qwen3.5:9b']);
+    expect(await service.invoke('serverModels', { kind: 'ollama', url: PI })).toEqual({ reachable: true, text: ['qwen3.5-4b'], images: [] });
+    // No Groq models without its key
+    expect(await service.invoke('serverModels', { kind: 'groq', url: '' })).toEqual({ reachable: false, text: [], images: [] });
+
+    // The Orange Pi off: the next server with a text model answers
+    piUp = false;
+    expect(await service.invoke('serverModels', { kind: 'ollama', url: PI })).toEqual({ reachable: false, text: [], images: [] });
+    await askParts(service, 'p1', { question: 'Що з бюджетом?' });
+    expect(llms.at(-1)).toEqual(DEFAULT_LLM);
+
+    // Its queue off: the background work is this computer's alone
+    await service.invoke('setServerQueue', { server: PI, queue: false });
+    expect(loadSettings().servers[0]).toMatchObject({ name: 'Orange Pi', queue: false });
+    expect((await service.invoke('status', {})).ai).toMatchObject({
+      lanes: [
+        { name: 'Orange Pi', id: PI, reachable: false, queue: false, takes: ['drafts', 'summaries'] },
+        { name: 'This computer', reachable: true, queue: true, takes: ['drafts', 'images', 'summaries'] },
+        { name: 'Groq', takes: [] },
+        { name: 'Gemini', takes: [] },
+        { name: 'Claude', kind: 'anthropic', reachable: false, takes: [] },
+      ],
+      answers: { server: 'This computer', model: 'qwen3.5:9b' },
+    });
+    await expect(service.invoke('setServerQueue', { server: 'http://nowhere', queue: true })).rejects.toThrow('No such server');
+  });
+
+  it('lists Claude\'s models with its key, newest first, for text and images alike', async () => {
+    let asked: Headers | null = null;
+    const service = makeService({
+      fetch: async (input, init) => {
+        if (String(input).startsWith('https://api.anthropic.com/v1/models')) {
+          asked = new Headers(init?.headers);
+
+          return Response.json({ data: [{ id: 'claude-opus-5-5' }, { id: 'claude-sonnet-5-5' }, { id: 'claude-haiku-5-5' }], has_more: false });
+        }
+
+        throw new TypeError('fetch failed');
+      },
+      secrets: { get: (name) => (name === 'llm:anthropic' ? 'sk-ant-test' : undefined), set: () => undefined, delete: () => undefined },
+    });
+    await service.start();
+
+    const models = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'];
+    expect(await service.invoke('serverModels', { kind: 'anthropic', url: '' })).toEqual({ reachable: true, text: models, images: models });
+    expect(asked!.get('x-api-key')).toBe('sk-ant-test');
+    expect(asked!.get('anthropic-version')).toBe('2023-06-01');
+    expect((await service.invoke('chatModels', {})).filter((model) => model.provider === 'anthropic').map((model) => model.model)).toEqual(models);
+  });
+
+  it('says what a cloud provider answered when it refuses to list its models', async () => {
+    const service = makeService({
+      fetch: async (input) => (String(input).startsWith('https://api.anthropic.com/')
+        ? Response.json({ type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } }, { status: 401 })
+        : Promise.reject(new TypeError('fetch failed'))),
+      secrets: { get: (name) => (name === 'llm:anthropic' ? 'sk-ant-wrong' : undefined), set: () => undefined, delete: () => undefined },
+    });
+    await service.start();
+
+    expect(await service.invoke('serverModels', { kind: 'anthropic', url: '' })).toEqual({
+      reachable: false, text: [], images: [], error: 'Claude answered 401: invalid x-api-key',
+    });
+  });
+
+  it('puts a summary back to wait when its server\'s queue is turned off in the middle of it', async () => {
+    saveSettings({ ...DEFAULT_SETTINGS, server: { port }, summaries: { auto: true, months: 0 } });
+    // A summary that goes on until it's stopped
+    model = new MockLanguageModelV3({
+      // Stopped before it's called, as fetch with an aborted signal is
+      doStream: ({ abortSignal }) => new Promise((_resolve, reject) => {
+        if (abortSignal?.aborted) {
+          reject(new Error('Aborted'));
+        }
+
+        abortSignal?.addEventListener('abort', () => reject(new Error('Aborted')));
+      }),
+    });
+    const { service } = await startWithMeetings();
+    await service.invoke('saveMeetingSeries', { name: 'Weekly planning', matchers: [{ code: 'abc-defg-hij' }] });
+    await vi.waitFor(async () => expect((await service.invoke('status', {})).summaries.running).toBe(true), { timeout: 4000 });
+
+    await service.invoke('setServerQueue', { server: DEFAULT_LLM.ollamaUrl, queue: false });
+
+    await vi.waitFor(async () => expect((await service.invoke('status', {})).summaries).toMatchObject({ running: false, pending: 1, skipped: 0, error: null }));
+    expect((await service.invoke('status', {})).summaries.waiting).toMatchObject({ reason: 'noServer' });
+  });
+
+  it('waits out a rate limit instead of skipping the meeting, and says until when', async () => {
+    saveSettings({ ...DEFAULT_SETTINGS, server: { port }, summaries: { auto: true, months: 0 } });
+    // As Gemini's free tier refuses: the minute's quota, try again in 37 seconds
+    model = new MockLanguageModelV3({
+      doStream: async () => {
+        throw Object.assign(new Error('You exceeded your current quota'), {
+          statusCode: 429,
+          responseBody: JSON.stringify({ error: { status: 'RESOURCE_EXHAUSTED', details: [{ retryDelay: '37s' }] } }),
+        });
+      },
+    });
+    const { service } = await startWithMeetings();
+    await service.invoke('saveMeetingSeries', { name: 'Weekly planning', matchers: [{ code: 'abc-defg-hij' }] });
+
+    await vi.waitFor(async () => expect((await service.invoke('status', {})).ai.lanes[0].limited).toMatchObject({ daily: false }), { timeout: 4000 });
+    const { summaries, ai } = await service.invoke('status', {});
+    expect(ai.lanes[0].limited!.until).toBeGreaterThan(Date.now() + 30_000);
+    // The meeting waits, not skipped until a restart
+    expect(summaries).toMatchObject({ pending: 1, skipped: 0, waiting: { reason: 'limited', server: 'This computer' } });
+  });
+
+  it('shares the background summaries between the servers with their queue on, each meeting once', async () => {
+    const PI = 'http://127.0.0.1:11435';
+    const orangePi = { name: 'Orange Pi', kind: 'ollama' as const, url: PI, text: 'qwen3.5-9b', images: '', queue: true };
+    saveSettings({ ...DEFAULT_SETTINGS, server: { port }, servers: [...DEFAULT_SETTINGS.servers, orangePi], summaries: { auto: true, months: 0 } });
+    // Slow enough that both servers are at work at once
+    let working = 0;
+    let most = 0;
+    model = new MockLanguageModelV3({
+      doStream: async () => {
+        working += 1;
+        most = Math.max(most, working);
+        await new Promise((resolve) => {
+          setTimeout(resolve, 300);
+        });
+        working -= 1;
+
+        return {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: 'stream-start', warnings: [] },
+              { type: 'text-start', id: 't' },
+              { type: 'text-delta', id: 't', delta: '- Погодили бюджет' },
+              { type: 'text-end', id: 't' },
+              { type: 'finish', finishReason: FINISH, usage: USAGE },
+            ],
+          }),
+        };
+      },
+    });
+    const service = await startService();
+    const { token } = await service.invoke('addBrowser', { label: 'Chrome' });
+    // A second meeting of the series, a week later
+    const [first] = FIXTURE.bundles as { session: { sessionId: string, stenogramaArray: { timestamp: number }[] } }[];
+    const week = 7 * 24 * 60 * 60_000;
+    const later = {
+      ...first,
+      session: {
+        ...first.session,
+        sessionId: '2026/10/27 10:00:00 -> /abc-defg-hij',
+        stenogramaArray: first.session.stenogramaArray.map((line) => ({ ...line, timestamp: line.timestamp + week })),
+      },
+    };
+    expect((await push(token, { ...FIXTURE, bundles: [...FIXTURE.bundles, later] })).status).toBe(200);
+    await service.invoke('saveMeetingSeries', { name: 'Weekly planning', matchers: [{ code: 'abc-defg-hij' }] });
+
+    // Activity tells what each server summarizes
+    const making = { title: expect.stringMatching(/^Weekly planning/), step: { done: 0, all: 1 } };
+    await vi.waitFor(async () => expect((await service.invoke('status', {})).summaries.servers).toMatchObject([
+      { name: 'This computer', work: { ...making, server: 'This computer' } },
+      { name: 'Orange Pi', work: { ...making, model: 'qwen3.5-9b', server: 'Orange Pi' } },
+    ]), { timeout: 4000, interval: 20 });
+    await vi.waitFor(async () => expect((await service.invoke('status', {})).summaries).toMatchObject({ done: 2, pending: 0, running: false }), { timeout: 4000 });
+    expect(most).toBe(2);
+    expect(new Set(llms.filter((llm) => llm.model !== 'qwen3.5:9b' || llm.ollamaUrl !== PI).map((llm) => llm.ollamaUrl))).toEqual(new Set([DEFAULT_LLM.ollamaUrl, PI]));
+    // Each meeting summarized once, and listed with the summary it made
+    expect((await service.invoke('aiUsage', { since: null })).tasks.find((row) => row.task === 'summary')).toMatchObject({ calls: 2, errors: 0 });
+    const groups = await service.invoke('aiCalls', { since: null, task: 'summary' });
+    expect(new Set(groups.map((group) => group.item)).size).toBe(2);
+    expect(groups.every((group) => group.title?.startsWith('Weekly planning ('))).toBe(true);
+    expect(await service.invoke('aiCallResult', { item: groups[0].item })).toMatchObject({ kind: 'summary', text: '- Погодили бюджет' });
   });
 
   it('asks again without a filter the rewrite took from the question', async () => {
@@ -678,7 +1028,7 @@ describe('the core service', () => {
     await service.invoke('saveMeetingSeries', { name: 'Weekly planning', matchers: [{ code: 'abc-defg-hij' }] });
     await vi.waitFor(async () => expect((await service.invoke('status', {})).summaries).toMatchObject({ done: 1, pending: 0, running: false }), { timeout: 5000 });
     expect((await service.invoke('status', {})).summaries).toMatchObject({
-      current: null, averageMs: expect.any(Number), skipped: 0, error: null, waitingFor: null,
+      servers: [{ name: 'This computer', work: null, wait: null, averageMs: expect.any(Number) }], skipped: 0, error: null, waiting: null,
     });
     expect((await service.invoke('meetingSeries', {})).series).toMatchObject([{ name: 'Weekly planning', meetings: 1, summarized: 1 }]);
 

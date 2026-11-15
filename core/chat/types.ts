@@ -14,6 +14,15 @@ export interface ChatRoom {
   title: string;
 }
 
+// A room that changed, as a messenger's realtime API tells it as it happens
+export interface RoomChange {
+  roomId: string;
+  // Its last message, when the change tells it
+  lastMessage?: number;
+  // When the user last read it, when the change tells it
+  readAt?: number;
+}
+
 // A message quoted in a reply ("reply with quote", or a link to a message pasted in it)
 export interface ChatQuote {
   author: string;
@@ -56,6 +65,8 @@ export interface ChatMessage {
   // The files themselves, to read an image's text and a document's (chat/attachments.ts)
   attachments?: ChatAttachment[];
   reactions?: ChatReaction[];
+  // The usernames it mentions (@all and @here left out); missing from messages kept before 2026-11-14
+  mentions?: string[];
   // The first message of a thread with replies
   startsThread?: boolean;
   edited?: boolean;

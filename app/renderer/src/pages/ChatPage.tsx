@@ -1,19 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Cloud, Loader2, Monitor } from 'lucide-react';
-import { cn } from 'cn';
 import type { AppEvent, AskPart, CitedSource, LlmSettings, ModelChoice, SavedTurn } from '../../../../core/protocol';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import Composer, { Chip } from '@/components/Composer';
 import MarkdownText from '@/components/MarkdownText';
 import ConversationDialog from '@/components/ConversationDialog';
 import MeetingDialog from '@/components/MeetingDialog';
 import ModelPicker from '@/components/ModelPicker';
+import SourceRow from '@/components/SourceRow';
 import type { Chats } from '@/lib/chats';
 import { citedNumbers } from '@/lib/citations';
 import { NO_FILTERS, requestChips, toFilters, type FilterFields, type Without } from '@/lib/filters';
-import { formatChunkStart, formatDay, isChatDocument } from '@/lib/format';
+import { isChatDocument } from '@/lib/format';
 import { errorMessage, useAppStatus, useKbEvents } from '@/lib/kb';
+import { answersLlm } from '@/lib/servers';
 
 // The chat (F6): streamed answers with [n] citations, filters set by hand, and the meeting view at the cited moment.
 // The core keeps each chat (core/chats.ts); the sidebar lists them
@@ -32,10 +32,14 @@ interface Turn {
   startedAt: number;
 }
 
-const EXAMPLES = [
-  'Що ми вирішили щодо релізу минулого тижня?',
-  'What did Olena say about the budget?',
+// Questions to start with; one about the latest meeting of the first series, when there is one, answered from its
+// summaries
+const examplesOf = (seriesNames: string[]) => [
   'Які задачі в мене з останньої зустрічі?',
+  'Які основні теми обговорювались цього тижня?',
+  ...(seriesNames.length ? [`Що обговорювали на останньому ${seriesNames[0]}?`] : []),
+  'Які рішення ми прийняли за останні два тижні?',
+  'Які питання залишились відкритими після зустрічей цього тижня?',
 ];
 
 const isRunning = (turn: Turn) => turn.state === 'searching' || turn.state === 'answering';
@@ -83,28 +87,6 @@ const useNow = (active: boolean) => {
 
   return now;
 };
-
-// A removed source is still listed, as its answer cites it, but no longer opens
-const SourceRow = ({ source, onOpen, dimmed }: { source: CitedSource, onOpen: (source: CitedSource) => void, dimmed?: boolean }) => (
-  <button
-    type="button"
-    onClick={() => onOpen(source)}
-    disabled={source.removed}
-    className={cn(
-      'flex w-full items-baseline gap-2 rounded px-2 py-1 text-left text-sm enabled:hover:bg-accent',
-      (dimmed || source.removed) && 'text-muted-foreground',
-    )}
-  >
-    <span className="w-6 shrink-0 text-xs font-medium text-primary">[{source.n}]</span>
-    <span className="min-w-0 truncate">{source.title}</span>
-    <span className="shrink-0 text-xs text-muted-foreground">
-      {formatDay(source.createdAt)}
-      {formatChunkStart(source)}
-    </span>
-    {source.madeByAi && <Badge variant="outline" className="shrink-0">made by AI</Badge>}
-    {source.removed && <Badge variant="outline" className="shrink-0">removed</Badge>}
-  </button>
-);
 
 // The models to ask again with, under a finished answer
 interface AskAgain {
@@ -253,7 +235,7 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
   // back, as models are installed elsewhere. Kept as they were when the same, not to draw the list again
   const listModels = useCallback(() => {
     const same = <T, >(next: T) => (current: T) => (JSON.stringify(current) === JSON.stringify(next) ? current : next);
-    window.kb.invoke('getSettings', {}).then((settings) => setDefaultLlm(same<LlmSettings | null>(settings.llm))).catch(() => undefined);
+    window.kb.invoke('getSettings', {}).then((settings) => setDefaultLlm(same<LlmSettings | null>(answersLlm(settings.servers)))).catch(() => undefined);
     window.kb.invoke('chatModels', {}).then((found) => setModels(same(found))).catch(() => undefined);
     window.kb.invoke('meetingSeries', {}).then(({ series }) => setSeriesNames(same(series.map(({ name }) => name)))).catch(() => undefined);
   }, []);
@@ -360,7 +342,7 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
   return (
     <div className="flex h-full flex-col">
       <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto flex max-w-3xl flex-col gap-6 p-6">
+        <div className="mx-auto flex max-w-3xl flex-col gap-6 p-6 xl:max-w-5xl">
           {loadError && <p className="text-sm text-destructive">{loadError}</p>}
           {!turns.length && !loadError && (
             <div className="mt-16 text-center">
@@ -369,7 +351,7 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
                 Answers cite the meetings they come from; dates and people are taken from the question.
               </p>
               <div className="flex flex-col items-center gap-2">
-                {EXAMPLES.map((example) => (
+                {examplesOf(seriesNames).map((example) => (
                   <Button key={example} variant="outline" size="sm" onClick={() => setQuestion(example)}>{example}</Button>
                 ))}
               </div>
@@ -394,7 +376,7 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
         </div>
       </div>
       <div className="bg-background">
-        <div className="mx-auto max-w-3xl px-4 pb-4">
+        <div className="mx-auto max-w-3xl px-4 pb-4 xl:max-w-5xl">
           <Composer
             question={question}
             onQuestion={setQuestion}

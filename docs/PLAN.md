@@ -354,21 +354,26 @@ on the release") and draft replies to new emails and messages.
     leave most of them out.
   - The meetings of a named series get a short summary in the background (Settings → "Meeting summaries": on, the last 3
     months by default), as "Summarize" makes them, after the images and documents and paused with them ("the background
-    AI work", from Settings, Sources or the tray).
+    AI work", from Activity or the tray).
   - Short summaries are indexed now, as `meeting-short-summary` documents made by AI, and found by any question (the
     Decisions of 2026-11-03 had them kept but not indexed).
-  - **Their progress is shown** (Sources → Index, Settings), as on Ollama a long meeting is several minutes of calls:
+  - **Their progress is shown** (Activity, from 2026-11-14; Sources → Index and Settings before), as on Ollama a long meeting is several minutes of calls:
     the meeting being summarized, its step (a part's notes or the summary), its time so far and its model (on this
     computer or in the cloud); the average time of the model's last 10 summaries and the time left by it, with the
     output tokens a second; the meetings skipped until a restart, the last error; and, when none is made while some
     wait, why (an answer goes first, the chats' files are read first, paused, the model not reached and when it's tried
     again). `summaries` keeps each one's time and calls for the average; the core's log has each call's time and
     tokens. The sidebar's line adds the time left ("Summarizing meetings: 14 left, ~1 h 20 min").
+  - **"Try a model"** under them summarizes a meeting with another model, to compare: each try's summary with its
+    time, calls, tokens and tokens a second, next to the saved one; nothing is kept (`trySummary`, stopped as
+    "Summarize" is). F8 holds: a meeting that may not go to cloud AI is tried only with Ollama. A try counts as a
+    summary asked for, so the background work doesn't start another meanwhile, and one already running is noted.
 
 - **The Sources page.** One "Add a source" opens tiles of what can be added (a browser with Stenograma, Rocket.Chat),
   each going on to its own steps; an empty page shows the same tiles. Another source is a tile more, not a button more.
   - Sources, "Meeting series" and "Index" (the embeddings, the background AI work and its pause, the API's address) are
-    tabs: the series no longer push the index down.
+    tabs: the series no longer push the index down. (From 2026-11-14 the series are in Settings → Meetings and the index
+    is the Activity page.)
   - A card shows its icon, its state as a dot (synced, syncing, waiting for a browser's first push, failed), what it has
     in the units of its kind (meetings, rooms, messages) instead of documents and chunks, and its cloud switch with the
     explanation in a tooltip. Rare actions (rename, a new token, rooms and period, remove) are in its "⋯" menu.
@@ -391,6 +396,138 @@ on the release") and draft replies to new emails and messages.
     "Try again", with the next try's time. The new token has a method of its own, `setRocketChatToken`, as "Rooms and
     period" can't list the rooms with the refused one.
 
+2026-11-14:
+
+- **The AI's work is kept for its statistics**, a row per model call (`ai_calls`): the AI SDK's middleware around every
+  language model the core makes (`wrapLanguageModel`), and a wrapper of the embedding provider, so no call site counts
+  by itself; a stream is kept at its `finish` part, as the SDK may not read on after it. A row per call rather than a
+  day's totals, so any statistic can come later (the slowest calls, by hour); a year of them, then a day's totals
+  forever. Activity shows a period's totals by task and by model (calls, time, tokens in and out, tokens/s, chunks,
+  errors); charts may come from the same rows. The time is the calls' own, so work on two servers at once counts
+  twice, and each retry is a call.
+- **Reply drafts for Rocket.Chat go ahead of M3.5 and M4**, as Rocket.Chat itself did (2026-11-12): the user is
+  mentioned there daily, and the drafts are what the plan is for. Only what M7 says for copying by hand: nothing is
+  sent, the token can already send but no code does.
+  - "Draft replies" on the source's card (`sources.replies_enabled`, off by default). Turned on, the unread messages to
+    the user of the last day get a draft (`chat_rooms.read_at` is the subscription's `ls`), and from then on every new
+    one, read or not, as the user may read a message before its draft is written. None older than 3 days gets one, as
+    when the app was off. Both are days in Settings → "Reply drafts" (`drafts.unreadDays`, `drafts.maxAgeDays`).
+  - "Draft a reply…" asks for one by hand, for a conversation's last message from someone else in those days, whatever
+    the rules say: to check the drafts without someone writing to the user, or for a message they missed. Such a draft
+    closes only when the user writes after asking for it.
+  - A message is to the user (F9): a direct message, a mention by name (`mentions` kept from 2026-11-14, `@username` in
+    the text of messages kept before; `@all` and `@here` don't count), or a reply in a thread the user started or wrote
+    in. Only the rooms the source reads count. A conversation (a thread, or a room's main line) has one open draft, for
+    its last message to the user: a later one supersedes it.
+  - Found after each sync (every 5 minutes at first; in seconds over Rocket.Chat's realtime API from 2026-11-15), and written before
+    the images and summaries, one at a time, paused with them. A draft the user asked for ("Draft a reply…", "Write
+    again"; `drafts.asked`) is written while paused too, as an answer in the chat is; a paused one says so. A draft closes when the user writes in its conversation
+    after its message, in Rocket.Chat or anywhere it syncs from.
+  - A draft is the conversation up to the message (a thread's first message and last replies, or the room's last 20 of
+    two days) and the knowledge base's search for the messages to the user since they last wrote, its own chunks left
+    out; at most 6 sources, cited as [n]. F8 as summaries: Ollama writes it when the chats may not go to cloud AI, in an
+    8192-token context.
+  - "Reply drafts" in the sidebar, with the count to review: each draft with its messages, the text to edit, its
+    sources, "Copy" (without the [n] marks), "Open in Rocket.Chat", "Write again" and "Dismiss". A notification says
+    how many are ready, never the message.
+- **Settings in tabs, and an Activity page** (replacing the Sources page's "Meeting series" and "Index" tabs): Settings
+  had grown into one long page mixing models, background jobs and their progress, with the progress shown twice
+  (Settings and Index) and the series apart from the summaries they're for.
+  - Settings has tabs: "AI models" (the servers with their models, queues and keys; the index's embedding model; from
+    2026-11-14's later decision below), "Meetings" (summaries, their
+    "Compare models on a meeting", and the meeting series), "Chats" (what is read of the files, reading the images
+    again and a try of the vision model; reply drafts) and
+    "General" (the extension's port, the data's folder). One Save for all the tabs, a tab with changes not saved marked;
+    the keys are saved at once, as before, and say so. Each model keeps its own Ollama address, as the LLM may be on
+    another machine than the embeddings (an Orange Pi through a tunnel). The tries of a model open on a click.
+    The embeddings' model is chosen with the same picker as the chat's, from every server's models that embed and
+    Gemini's with its key (`taskModels`); a model not listed can't be typed any more: one that isn't on a server can't
+    run there.
+  - "Activity" in the sidebar, next to Settings: a row each for the index, the chats' files, the meetings' summaries,
+    the reply drafts and the extension's API, with their progress and errors, the data's folder, and the pause of the
+    background AI work at the top (it pauses the drafts too, and says so). The status line opens it, or Sources for a
+    source to fix. Settings shows no progress but a model's rebuild, with a link to it. As the background work runs on
+    several servers at once, the AI servers row says what each does now (the task, its meeting, image or conversation,
+    the time so far) or that it's busy with what was asked, isn't reached or is idle, with what waits for it; the
+    images and the drafts show the one done now, the average time of the last ten by the model set (kept in memory
+    only) and what's left, as the summaries do; and each task says why it waits on its own server (`TaskWait`: what was
+    asked, another task's work there, the pause, the server not reached, a model that doesn't read images).
+  - The Sources page is the sources only, without tabs.
+- **Reply drafts learn the user's style** from what they wrote, without training a model (a LoRA was weighed: too
+  heavy on a 6 GB GPU, again for every model, the NPU's included, and it wouldn't bring the facts anyway):
+  - Each draft's prompt has up to 8 of the user's replies to the most similar messages: their message after someone
+    else's in the same conversation within an hour, with the ones written within 3 minutes after it as one reply;
+    ranked by the same person, the same room, shared words and how recent. None from the conversation given. About
+    2400 of them in the real chats; picked in ~200 ms.
+  - A draft the user answered keeps that message (`drafts.sent_message_id`): the last 3 rewritten before sending are
+    in the prompt as "Draft / Sent", and Settings says how many were sent as written, a measure of the drafts.
+  - "Your style" in Settings → Chats → Reply drafts (`drafts.style`): a description of how they write, made by
+    "Describe my style" (the answers' model reads their latest 200 messages; Ollama's unless every chat may go to
+    cloud AI) and edited by the user, in the drafts' system prompt.
+  - Examples and corrections take at most 1200 tokens of the prompt; they come only from the draft's own source, so
+    F8 holds as for its conversation.
+- **AI servers, a model per task, and a background queue per server**, for the Orange Pi 5 Plus's NPU
+  (`docs/orangepi-npu-setup.md`: RKLLama with Ollama's API, through an SSH tunnel at `127.0.0.1:11435`; Qwen3.5
+  2B/4B/9B and Gemma 4 E2B, no embedding or vision model):
+  - Settings → AI models lists the servers (`servers`: name, address, its model for the background work), this
+    computer's first, each checked as it's typed. A model keeps its server's address (`ollamaUrl`), so F8's loopback
+    rule, the chats' own models and the providers stay as they were; a server's new address moves its models.
+  - "Models" sets which model does what: answers, summaries (`summaries.llm`) and reply drafts (`drafts.llm`), these
+    two "Same as answers" by default; the embeddings and the vision model choose a server (or Gemini) instead of an
+    address. The chat's model list is grouped by server.
+  - The background work runs a queue per lane, a server or a cloud provider (`core/servers.ts`): the Orange Pi
+    summarizes while this computer reads images and answers. Work gives way only to what the user asked for on the
+    same lane. A kind of work moved meanwhile waits for the lane still doing it.
+  - A server not reached stops its lane; the servers are asked every 30 seconds (`/api/version`) and a lane runs again
+    as soon as its server answers. What the user asks for (an answer, "Summarize", a draft asked for, "Describe my
+    style") goes to the fallback's model (`fallback`, this computer's qwen3.5:9b by default; "None" to say it isn't
+    reached) when its server isn't reached; the background work waits instead of taking this computer's GPU.
+  - Moving the background work in one go: "Background AI on" in the tray (summaries and drafts), or each on Activity,
+    to a server's model (`moveBackground`). Activity shows the servers and where each task runs.
+- **The models are set on the servers, and the background work shares one queue** (later the same day: the "Models"
+  rows repeated what the servers said, and this computer sat idle while every task was on the Orange Pi). The above's
+  per-task models, `fallback` and moving the work are gone:
+  - Each server (`servers`, in order) has its kind (`ollama`, `groq`, `gemini`), an address for Ollama's, a model for
+    text (answers, summaries, drafts, the style) and one for images (none for Groq), both chosen from what it lists,
+    and its queue on or off. Groq, Gemini and Claude (`anthropic`, added the same day through `@ai-sdk/anthropic`, as
+    the others go through the AI SDK; its models listed by Anthropic's `/v1/models`, every one reading images) are
+    always in the list, their keys set on their rows (the Keys card is gone); their queue is off by default, and on it takes only the work of sources that may go to cloud AI (F8).
+  - The chat answers with the first server's text model; when its server isn't reached, the next one's in order takes
+    what the user asks for, so the order is the fallback. A chat's own model stays as it was.
+  - Every server with its queue on runs a lane of the background queue and takes the next draft, image or meeting it
+    has a model for (drafts, then images, then summaries); what a lane took is claimed in memory, so no two take the
+    same. A draft whose server isn't reached waits again for another. Settings older than this are made into servers
+    from their per-task models (`serversOf`).
+  - The embeddings stay one model for the index (vectors of two models can't be compared), chosen under the servers.
+  - The tray and Activity turn a server's queue on or off (`setServerQueue`); Activity shows what each server does and
+    takes, and why a task waits on all of them (or that no server takes it).
+  - Each task's row on Activity (summaries, images, drafts) lists the servers whose queue takes it (`TaskServer`, from
+    2026-11-15): the one each does now, with a summary's step, or why it doesn't, and its model's average time (and a
+    summary's tokens/s); what's left is counted with all of them at work, each at its model's speed. Before, a task
+    showed only the first server's work, and one average for all.
+  - One text model per server: the Orange Pi's NPU keeps one model loaded, and two would swap back and forth.
+  - A cloud provider's rate limit (`core/ratelimit.ts`) stops only its lane, never the work: a refusal (429, Gemini's
+    `RESOURCE_EXHAUSTED`) puts the draft, meeting or image back to wait and the lane until the provider's `Retry-After`
+    or Google's `retryDelay`, or, for a day's quota, its next midnight in California; Groq's and Anthropic's limit
+    headers stop the lane before a refusal, when no request or too few tokens are left. Gemini sends no such headers,
+    so its limits are known only from its refusals. Activity says until when.
+- **Rocket.Chat's new messages arrive as they're sent** (2026-11-15), over its realtime API (DDP on the server's
+  `/websocket`, as its web client uses; `core/rocketchat/realtime.ts`), as 5 minutes was too long a wait for a reply
+  draft. Polling once a minute (constant load on the server, still a minute) and polling only `subscriptions.get` with
+  `updatedSince` every 30 s were weighed.
+  - It logs in with the source's token as a resume token and subscribes to the user's `stream-notify-user`
+    (`rooms-changed`, `subscriptions-changed`, thread replies included). The rooms that changed, gathered for 1.5 s,
+    are read at once without listing the rooms (`syncRooms`: one `chat.syncMessages` a room), then the drafts are
+    found, first in the queue. A room not kept yet (a new direct message) runs the whole sync.
+  - Polling stays, for what a change doesn't tell and as the fallback: every 30 minutes while connected, at the
+    source's interval while not, and at once after a reconnection. A ping every 30 s finds a dropped connection (a
+    laptop's sleep); it connects again after 5 s, twice as late each time up to 5 minutes. A refused token is tried
+    again the same way, with a new one once given.
+  - The source's calls a minute count every read, the live ones too, across its runs (`createApiLimits`, one per
+    source): more rooms changed in a minute than it allows wait for the next one.
+  - No new service: the same server and token. Node's own `WebSocket` (Electron 45's Node 24), no package. What
+    arrives is never logged (a room's change carries its last message). The source's card says "Live".
+
 ## Why Electron, with a core of its own
 
 Email and messengers need a process of their own on the machine: a browser can't poll sources while it's closed, and an
@@ -407,7 +544,7 @@ Running the core inside the app means:
   (with why: a new token needed, the server not reached), the extension unable to send, the index or the reading of
   images stopped by an error, the work going on (indexing, a model's rebuild, images and files, meeting summaries, with
   how much is left), the background AI paused, else "Up to date" (not a count of chunks). Its tooltip has the whole
-  state, and a click opens the Sources page's tab where it's seen and fixed. A routine sync isn't shown: it would blink
+  state, and a click opens where it's seen and fixed (Sources for a source, else Activity, from 2026-11-14). A routine sync isn't shown: it would blink
   every few minutes.
 - **Starting at login** is a checkbox in the tray's menu, no longer in Settings: the app stays there. Saving Settings
   keeps it as the tray set it.
@@ -568,7 +705,7 @@ Alternatives considered:
   - Sending goes through the source as a reply in the same thread (the Reply column of [Connectors](#connectors)). A
     log keeps what was sent: ids, time, conversation.
   - Drafts need new messages within a minute, not 5–15. Sources with live connections use them (Slack Socket Mode,
-    Rocket.Chat's realtime API, Telegram updates); the others are polled every minute.
+    Rocket.Chat's realtime API, done 2026-11-15; Telegram updates); the others are polled every minute.
   - Write access is asked for when replies are turned on for a source, not when it's connected.
 
 ### Non-functional
@@ -644,7 +781,7 @@ without approval, a people directory that joins one person's names across source
     transcripts.
   - `stenograma_rows`: the rows a browser pushed (source, table, key, JSON), so the core can index them again when the
     rules of F1 change, without a push, and another browser's copy of a session can take over.
-  - `chat_rooms` (a messenger's rooms read, with their cursors and members) and `chat_messages` (each message as the
+  - `chat_rooms` (a messenger's rooms read, with their cursors, members and when the user last read them) and `chat_messages` (each message as the
     chunker reads it: author, text, quotes, files, its thread), so a room is indexed again without a sync. A room's day
     is a document (`chat`), a thread another (`chat-thread`), and a file's text a third (`chat-file`).
   - `chat_attachments`: a message's image or document whose content is read, with its state (pending, done, failed,
@@ -659,8 +796,22 @@ without approval, a people directory that joins one person's names across source
   - `llm_usage` (M3.5): tokens in and out per day and model, and the number of calls.
   - `summaries`: the app's short summary of a document (a meeting), with the hash of the text it summarized, the
     model, and how long it took in how many calls (null for those made before 2026-11-13); it goes with its document.
-  - `drafts`: source, conversation, the message replied to, text, the chunks used, status (`pending`, `sent`,
-    `dismissed`), createdAt; and `sent_log`.
+  - `drafts` (2026-11-14, Rocket.Chat first): source, conversation (room and thread), the message replied to, why it
+    got one (`direct`, `mention`, `thread`), text, the sources it was given, model, error, state (`waiting`, `writing`,
+    `ready`, `failed`; closed as `dismissed`, `replied`, `superseded`; `sent` from M8), createdAt, `asked`, and
+    `sent_message_id` (the user's message that answered it, for their style); and `sent_log` (M8).
+  - `ai_calls` (2026-11-14): a row per model call, each try of it, for the AI's statistics: when, ms, task (`answer`,
+    `rewrite`, `summary`, `draft`, `image`, `style`, `embedding`, `search`), provider, model, server (an Ollama
+    address, else the provider), input and output tokens as the provider counts them, items (chunks embedded), error
+    (`unreachable`, `timeout`, `aborted`, `failed`) with what it said cut to 300 characters (`error_message`, from
+    2026-11-14, for the list of errors a number of them opens; the database keeps the sources themselves, so it holds
+    nothing new, and it's never logged; a list's errors can be deleted, the failed calls themselves, so they don't
+    count as calls that answered), what it worked on by its ids (`item`: `meeting:…`, `draft:…`, `file:…`,
+    `turn:…`, named in that list; a number of calls opens them by item, each with its result as its own table keeps it
+    now: the summary, the draft, the image's reading, the answer, so nothing is kept twice), background. Never the
+    call's text. Kept a year, then
+    folded into `ai_call_days` (a day's totals by task, model, server and background), so a period's statistics count
+    both.
 - **Embeddings.** One provider interface with three implementations:
   - Ollama `bge-m3` (1024 dimensions, the best of these for Ukrainian);
   - transformers.js in the core (multilingual-e5, no Ollama needed). It needs the `query:` / `passage:` prefixes, and
@@ -970,7 +1121,7 @@ What makes the app worth opening every day while it has meetings only, and what 
   - Ollama doesn't answer;
   - the embedding queue makes no progress;
   - the extension's port is taken.
-- **The index's progress.** The Sources page's index card shows, besides the chunks still to embed:
+- **The index's progress.** The Activity page's index row shows, besides the chunks still to embed:
   - a progress bar for the queue, as for a model's rebuild, with the speed (chunks a minute) and the time left;
   - what's waiting, per source;
   - the last runs: when, how many chunks, how long, and the error of a failed one.

@@ -62,6 +62,8 @@ export interface SourceStatus extends Source {
   firstMeetingAt: number | null;
   summarized: number;
   inSeries: number;
+  // A messenger's: whether new messages to the user get a reply draft
+  repliesEnabled: boolean;
 }
 
 // A meeting's document id is stenograma:<source>:<session> (meetingDocumentId)
@@ -77,7 +79,7 @@ export const listSources = (db: Db): SourceStatus[] => {
 
   return (db.prepare(`
     select s.id, s.kind, s.account, s.config, s.cloud_allowed as cloudAllowed, s.last_sync_at as lastSyncAt, s.last_error as lastError,
-      s.last_seen_at as lastSeenAt,
+      s.last_seen_at as lastSeenAt, s.replies_enabled as repliesEnabled,
       (select count(*) from documents d where d.source_id = s.id) as documents,
       (select count(*) from documents d where d.source_id = s.id and d.kind = 'meeting') as meetings,
       (select count(*) from chunks c join documents d on d.id = c.document_id where d.source_id = s.id) as chunks,
@@ -87,14 +89,15 @@ export const listSources = (db: Db): SourceStatus[] => {
       (select count(*) from documents d join summaries m on m.document_id = d.id where d.source_id = s.id and d.kind = 'meeting') as summarized,
       (select count(*) from documents d where d.source_id = s.id and d.kind = 'meeting' and d.series_id is not null) as inSeries
     from sources s order by s.id
-  `).all() as (Omit<SourceStatus, 'cloudAllowed' | 'browser' | 'latestMeeting' | 'indexedElsewhere' | 'copiesIn'>
-    & { cloudAllowed: number, config: string, latestMeeting: string | null })[])
+  `).all() as (Omit<SourceStatus, 'cloudAllowed' | 'browser' | 'latestMeeting' | 'indexedElsewhere' | 'copiesIn' | 'repliesEnabled'>
+    & { cloudAllowed: number, config: string, latestMeeting: string | null, repliesEnabled: number })[])
     .map(({ config, latestMeeting, ...row }) => {
       const copiesIn = copies.filter((copy) => copy.sourceId === row.id).map(({ indexedIn, meetings }) => ({ sourceId: indexedIn, meetings }));
 
       return {
         ...row,
         cloudAllowed: Boolean(row.cloudAllowed),
+        repliesEnabled: Boolean(row.repliesEnabled),
         browser: row.kind === BROWSER_KIND ? browserOf(row.account, config) : null,
         latestMeeting: latestMeeting ? JSON.parse(latestMeeting) as { title: string, createdAt: number } : null,
         copiesIn,

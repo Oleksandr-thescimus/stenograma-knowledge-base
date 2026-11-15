@@ -44,8 +44,15 @@ const stateOf = (source: SourceInfo): { tone: Tone, text: string, hint?: string 
   }
 
   if (connector) {
+    const next = connector.nextAt ? `${connector.live ? 'next full sync' : 'Next sync'} at ${formatTime(connector.nextAt)}` : '';
+
+    // Live: new messages arrive as they're sent, and the whole sync is rarer
+    if (connector.live && source.lastSyncAt) {
+      return { tone: 'ok', text: `Live · synced ${formatWhen(source.lastSyncAt)}`, hint: `New messages arrive as they're sent${next && `; ${next}`}` };
+    }
+
     return source.lastSyncAt
-      ? { tone: 'ok', text: `Synced ${formatWhen(source.lastSyncAt)}`, hint: connector.nextAt ? `Next sync at ${formatTime(connector.nextAt)}` : undefined }
+      ? { tone: 'ok', text: `Synced ${formatWhen(source.lastSyncAt)}`, hint: next || undefined }
       : { tone: 'idle', text: 'Not synced yet' };
   }
 
@@ -132,6 +139,9 @@ const SourceCard = ({ source, nameOf, onAction }: SourceCardProps) => {
   const setCloud = (allowed: boolean) => window.kb.invoke('setCloudAllowed', { sourceId: source.id, allowed })
     .catch((reason: unknown) => setError(errorMessage(reason)));
 
+  const setReplies = (enabled: boolean) => window.kb.invoke('setRepliesEnabled', { sourceId: source.id, enabled })
+    .catch((reason: unknown) => setError(errorMessage(reason)));
+
   return (
     <div className="rounded-lg border bg-card p-4">
       <div className="flex items-start gap-3">
@@ -142,7 +152,8 @@ const SourceCard = ({ source, nameOf, onAction }: SourceCardProps) => {
             {state.tone === 'busy'
               ? <Loader2 className="size-3.5 shrink-0 animate-spin" />
               : <span className={cn('size-2 shrink-0 rounded-full', DOTS[state.tone])} aria-hidden />}
-            <span className="truncate">{state.text}</span>
+            {/* A sync's progress is long: it wraps rather than being cut */}
+            <span className={state.tone === 'busy' ? 'min-w-0' : 'truncate'}>{state.text}</span>
             {state.hint && <Hint text={state.hint} label="When it syncs" />}
           </p>
           <p className="text-sm text-muted-foreground">{factsOf(source, nameOf)}</p>
@@ -228,10 +239,21 @@ const SourceCard = ({ source, nameOf, onAction }: SourceCardProps) => {
         <Hint
           label="What cloud AI sees"
           text={source.cloudAllowed
-            ? 'Its content may go to Groq or Gemini when they answer, and to Gemini\'s embeddings.'
+            ? 'Its content may go to Groq, Gemini or Claude when they answer, and to Gemini\'s embeddings.'
             : 'Only Ollama on this computer sees it; with a cloud model it\'s left out of answers.'}
         />
       </div>
+      {source.kind === 'rocketchat' && (
+        <div className="mt-2 flex items-center gap-2 pl-[3.25rem] text-sm">
+          <Switch checked={source.repliesEnabled} onCheckedChange={setReplies} aria-label="Draft replies" />
+          <span className={source.repliesEnabled ? '' : 'text-muted-foreground'}>Draft replies</span>
+          <Hint
+            label="What gets a draft"
+            text={`Direct messages, mentions of you and replies in your threads get a reply draft after each sync, in Reply drafts, from the rooms it reads. Turned on, the unread ones of the last day get one too. ${
+              source.cloudAllowed ? '' : 'Only Ollama on this computer writes them, as the chats may not go to cloud AI. '}Nothing is sent: you copy a draft into Rocket.Chat.`}
+          />
+        </div>
+      )}
     </div>
   );
 };

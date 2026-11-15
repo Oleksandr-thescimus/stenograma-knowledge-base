@@ -3,15 +3,32 @@
 //
 // renderer ──window.kb (preload, IPC)──▶ main ──MessagePort──▶ core (utilityProcess: core/service.ts)
 
-export type LlmProvider = 'groq' | 'gemini' | 'ollama';
+export type LlmProvider = 'groq' | 'gemini' | 'anthropic' | 'ollama';
 export type EmbeddingProviderName = 'ollama' | 'gemini';
-// The providers whose keys the app keeps in the keyring; Gemini's serves its embeddings too
-export type KeyProvider = 'groq' | 'gemini';
+// The providers whose keys the app keeps in the keyring; Gemini's serves its embeddings too. Anthropic's is Claude
+export type KeyProvider = 'groq' | 'gemini' | 'anthropic';
 
 export interface LlmSettings {
   provider: LlmProvider;
   model: string;
   ollamaUrl: string;
+}
+
+export type AiServerKind = 'ollama' | 'groq' | 'gemini' | 'anthropic';
+
+// Where the models run, in the order the chat tries them: an Ollama-compatible server (this computer's Ollama, an
+// Orange Pi's RKLLama through an SSH tunnel), known by its address, or Groq's or Gemini's API with its key in the
+// keyring. The first reached with a text model answers the chat; every one with the queue on takes the background work
+export interface AiServer {
+  name: string;
+  kind: AiServerKind;
+  // Ollama's API; empty for a cloud provider
+  url: string;
+  // Its model for text (answers, summaries, drafts) and for images; empty for none
+  text: string;
+  images: string;
+  // Takes the background work: summaries, drafts, images (a cloud provider only of the sources that may go there, F8)
+  queue: boolean;
 }
 
 export interface EmbeddingSettings {
@@ -20,13 +37,47 @@ export interface EmbeddingSettings {
   ollamaUrl: string;
 }
 
+// A piece of the background AI work being done now: a meeting's summary, an image read, a reply draft
+export interface WorkNow {
+  // A meeting's title, an image's name, a draft's conversation
+  title: string;
+  // Its room, its day
+  detail: string | null;
+  startedAt: number;
+  // e.g. qwen3.5-4b, on Orange Pi
+  model: string;
+  server: string;
+  // A summary's model calls: those done of all (the parts' notes, then the summary)
+  step?: { done: number, all: number };
+}
+
+export type BackgroundTask = 'summaries' | 'images' | 'drafts';
+
+// Why a task's work waits while some is to do, on every server that takes it (server names the first): what the user
+// asked for goes first there, or another task's work (drafts, then images, then summaries); the work is paused; the
+// server isn't reached, tried again at retryAt; its model doesn't read images, tried again at retryAt or when the
+// settings change; no server takes it (none with the queue on has a model for it)
+export interface TaskWait {
+  reason: 'answer' | BackgroundTask | 'paused' | 'unreachable' | 'noVision' | 'noServer' | 'limited';
+  server: string;
+  retryAt: number | null;
+}
+
+// A server whose queue takes a task's work, as the task's row on Activity tells it: the one it does now, or why not
+// while some waits (null when nothing is in the way), and how fast its model is
+export interface TaskServer {
+  name: string;
+  work: WorkNow | null;
+  wait: TaskWait | null;
+  // The average time of its model's last ones (a summary, an image, a draft), null before one was timed
+  averageMs: number | null;
+  // Output tokens a second of its last summary, when the provider counts them
+  tokensPerSecond: number | null;
+}
+
 // Chat files whose content is read (F3): images by a vision model, documents without one
 export interface AttachmentSettings {
   describeImages: boolean;
-  // The vision model: Ollama's on this computer, or Gemini's for the sources that may go to cloud AI (F8)
-  provider: 'ollama' | 'gemini';
-  model: string;
-  ollamaUrl: string;
   // A PDF's text layer, a text file
   readDocuments: boolean;
   // Files of the last this many months are read; 0 for all
@@ -41,11 +92,31 @@ export interface SummarySettings {
   months: number;
 }
 
+// Which messages get a reply draft by their age (F9): when drafts are turned on, the unread ones of the last this many
+// days; and none older than this many days, as when the app was off
+export interface DraftSettings {
+  unreadDays: number;
+  maxAgeDays: number;
+  // How the user writes, for the drafts' model: made by "Describe my style" and edited by the user; empty for none
+  style: string;
+}
+
+// What the drafts learn the user's style from: their replies, and the drafts they answered (with how
+// many were sent as written)
+export interface DraftLearning {
+  replies: number;
+  answered: number;
+  asWritten: number;
+}
+
 export interface Settings {
+  // In the chat's order; Groq and Gemini are always there
+  servers: AiServer[];
   attachments: AttachmentSettings;
   summaries: SummarySettings;
+  drafts: DraftSettings;
+  // The index's model: one, as vectors of two models can't be compared
   embedding: EmbeddingSettings;
-  llm: LlmSettings;
   // The API for the extension, on 127.0.0.1 (N2)
   server: { port: number };
   // Set in the tray's menu
@@ -83,6 +154,8 @@ export interface SourceInfo {
   inSeries: number;
   // Its chunks waiting for the embedding model
   embeddingsPending: number;
+  // A messenger's: whether new messages to the user get a reply draft (F9)
+  repliesEnabled: boolean;
   // A connector's source (Rocket.Chat): what it reads, and its sync; null for the others
   connector: ConnectorInfo | null;
 }
@@ -99,6 +172,8 @@ export interface ConnectorInfo {
   nextAt: number | null;
   // What the last run's error was, for what to do about it: the token refused or missing, the server not reached
   problem: SyncProblem | null;
+  // Its new messages arrive as they're sent (Rocket.Chat's realtime API connected); null for a source not watched
+  live: boolean | null;
 }
 
 export type SyncProblem = 'auth' | 'network' | 'other';
@@ -249,6 +324,9 @@ export interface AttachmentStatus {
   // The background AI work (images, summaries) paused, until then or until resumed (until null); documents are still
   // read
   paused: { until: number | null } | null;
+  // The images: those waiting, the servers reading them (each with the one it reads now), why none is read while some
+  // wait
+  images: { pending: number, servers: TaskServer[], waiting: TaskWait | null };
 }
 
 // The short summaries of named series' meetings, of the period set
@@ -256,38 +334,220 @@ export interface SummaryStatus {
   pending: number;
   done: number;
   running: boolean;
-  // The meeting summarized now in the background: the model calls done of all (the parts' notes, then the summary), its
-  // model, and when it started
-  current: {
-    title: string;
-    createdAt: number;
-    startedAt: number;
-    done: number;
-    all: number;
-    llm: string;
-    local: boolean;
-  } | null;
-  // The average time of the last summaries of the model working (or of the last one), null before one was timed
-  averageMs: number | null;
-  // Output tokens a second of the last summary, when the provider counts them
-  tokensPerSecond: number | null;
+  // The servers summarizing the meetings in the background, each with the one it makes now
+  servers: TaskServer[];
   // Failed or without text in this run of the core: tried again after a restart
   skipped: number;
   // The last background summary's error
   error: string | null;
-  // Why none is being made while some wait: an answer or "Summarize" goes first, then the chats' files; the work is
-  // paused; or the model wasn't reached, tried again at retryAt
-  waitingFor: 'answer' | 'files' | 'paused' | 'unreachable' | null;
+  // Why none is being made while some wait
+  waiting: TaskWait | null;
+}
+
+// Reply drafts (F9): those to review, those still to write, and the one being written
+export interface DraftStatus {
+  ready: number;
+  waiting: number;
+  writing: boolean;
+  // The last one's error
+  error: string | null;
+  // The servers writing them, each with the one it writes now; why none is written while some wait
+  servers: TaskServer[];
+  wait: TaskWait | null;
+}
+
+// Why a message got a draft: a direct message, a mention by name, or a reply in a thread the user wrote in
+export type DraftReason = 'direct' | 'mention' | 'thread' | 'manual';
+
+export type DraftState = 'waiting' | 'writing' | 'ready' | 'failed';
+
+// A message of the conversation, as the draft's view shows it
+export interface DraftMessage {
+  id: string;
+  author: string;
+  text: string;
+  ts: number;
+  // The user's own
+  mine: boolean;
+}
+
+// A meeting to try a summary model on (Settings → Meeting summaries)
+export interface SummaryTryMeeting {
+  sourceId: number;
+  sessionId: string;
+  title: string;
+  createdAt: number;
+  // Its lines of text, which the time depends on
+  lines: number;
+  // Its saved short summary, to compare with
+  saved: { text: string, model: string, durationMs: number | null } | null;
+}
+
+// A tried summary: its text, and how long it took in how many calls, with the tokens when the provider counts them
+export interface SummaryTry {
+  llm: string;
+  local: boolean;
+  text: string;
+  ms: number;
+  calls: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  // Output tokens a second of the calls' time
+  tokensPerSecond: number | null;
+  // Background work (a summary, an image) ran meanwhile on the same model or GPU, so the time is longer than alone
+  shared: boolean;
+}
+
+// A conversation a draft can be asked for: a room's main line or a thread, with its last message
+export interface DraftableConversation {
+  sourceId: number;
+  roomId: string;
+  threadId: string | null;
+  conversation: string;
+  last: { author: string, text: string, ts: number };
+  // An open draft of it already
+  drafted: boolean;
+}
+
+// A reply draft to review (Drafts page): the message it answers with the messages before it, and the draft with the
+// sources it was given, cited as [n]
+export interface DraftView {
+  id: number;
+  sourceId: number;
+  // "#general", "direct: Olena", with "› thread" for a thread
+  conversation: string;
+  reason: DraftReason;
+  state: DraftState;
+  // The last few messages, the one answered last
+  messages: DraftMessage[];
+  text: string;
+  sources: CitedSource[];
+  llm: string | null;
+  local: boolean;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+  // While it waits: how many are written before it
+  ahead: number;
+  // Asked for by the user ("Draft a reply…", "Write again"): written while the background work is paused too
+  asked: boolean;
+}
+
+// Where each task's model runs, and whether the servers answer, for Activity and the tray
+// What a model call was for: an answer and the rewrite of its question, a meeting's summary (each of its calls), a reply
+// draft, an image read, the style's description, chunks embedded, a search's question embedded
+export type AiTask = 'answer' | 'rewrite' | 'summary' | 'draft' | 'image' | 'style' | 'embedding' | 'search';
+
+// The totals of model calls: the time is their sum, so calls at once on two servers count twice
+export interface UsageRow {
+  calls: number;
+  // Of them, made by the background work
+  background: number;
+  ms: number;
+  inputTokens: number;
+  outputTokens: number;
+  // Output tokens a second of the calls that counted them
+  tokensPerSecond: number | null;
+  // Chunks embedded, images read: a call each else
+  items: number;
+  errors: number;
+}
+
+// The AI's work since then (all of it for null), kept from the first call on
+export interface AiUsage {
+  since: number | null;
+  first: number | null;
+  total: UsageRow;
+  tasks: (UsageRow & { task: AiTask })[];
+  // serverId: an Ollama server's address, else the provider, to list its errors
+  models: (UsageRow & { provider: string, model: string, server: string, serverId: string })[];
+}
+
+// The errors to list: since then (all for null), of a task or of a model on a server (serverId), or all of them
+export interface AiErrorsQuery {
+  since: number | null;
+  task?: AiTask | null;
+  model?: { provider: string, model: string, server: string } | null;
+}
+
+// The calls of a period by what they worked on (a meeting's summary takes several), the newest first
+export interface AiCallGroup {
+  // Its ids, to open its result: meeting:sourceId:sessionId, draft:id, file:sourceId:fileId, turn:id
+  item: string;
+  // A meeting's title, a draft's conversation, an image's name, a question; null when it's gone
+  title: string | null;
+  task: AiTask;
+  provider: string;
+  model: string;
+  server: string;
+  calls: number;
+  ms: number;
+  inputTokens: number;
+  outputTokens: number;
+  errors: number;
+  lastAt: number;
+}
+
+// What a call made, as it's kept now (a summary made again, an image read again, shows the latest)
+export type AiCallResult =
+  | { kind: 'summary', text: string, model: string, sourceId: number, sessionId: string, title: string, createdAt: number }
+  | { kind: 'draft', text: string, state: string, conversation: string }
+  | { kind: 'image', description: string | null, text: string | null, name: string }
+  | { kind: 'answer', question: string, text: string, chatId: number }
+  // None made yet: being made now, failed (tried again after a restart), or waiting in the queue
+  | { kind: 'none', reason: 'working' | 'failed' | 'waiting' };
+
+// A failed model call: its kind, and what it said (cut short; none before 2026-11-14's errors were kept)
+export interface AiError {
+  startedAt: number;
+  ms: number;
+  task: AiTask;
+  provider: string;
+  model: string;
+  server: string;
+  error: 'unreachable' | 'timeout' | 'aborted' | 'failed';
+  message: string | null;
+  background: boolean;
+  // What it worked on: a meeting's title, a draft's conversation, an image's name and room; null when not kept, or gone
+  item: string | null;
+}
+
+// What a server (or a cloud provider with background work) does now, and the background work waiting for it
+export interface LaneActivity {
+  name: string;
+  // serverId: its address, or the cloud provider
+  id: string;
+  kind: AiServerKind;
+  // Null for a cloud provider, or a server not asked yet
+  reachable: boolean | null;
+  // Its queue on, and what of the background work it can take (a text model: summaries and drafts; images)
+  queue: boolean;
+  takes: BackgroundTask[];
+  now: { task: BackgroundTask, work: WorkNow } | null;
+  // Busy with what the user asked for: an answer, a summary, a draft asked for
+  asked: boolean;
+  // Not reached, tried again then
   retryAt: number | null;
+  // A cloud provider at its rate limit, or about to be: until then, and whether it's the day's quota
+  limited: { until: number, daily: boolean } | null;
+}
+
+export interface AiStatus {
+  // A server each, in the settings' order
+  lanes: LaneActivity[];
+  // The chat's model now: the first server reached with a text model
+  answers: { model: string, server: string } | null;
 }
 
 export interface CoreStatus {
   kbId: string;
+  ai: AiStatus;
   dataDir: string;
   sources: SourceInfo[];
   embedding: EmbeddingStatus;
   attachments: AttachmentStatus;
   summaries: SummaryStatus;
+  drafts: DraftStatus;
   server: ServerStatus;
 }
 
@@ -440,10 +700,16 @@ export interface SavedChat {
   turns: SavedTurn[];
 }
 
+// The models listed apart from the chat's: the vision model's and the embeddings'
+export type ModelTask = 'images' | 'embeddings';
+
 // A model a chat's questions can go to
 export interface ModelChoice {
   provider: LlmProvider;
   model: string;
+  // Ollama's: the server it's on
+  ollamaUrl?: string;
+  server?: string;
   // Ollama on this computer: it sees every source (F8)
   local: boolean;
 }
@@ -547,9 +813,23 @@ export interface CoreMethods {
   // The latest images of the chats, to try a vision model on
   recentImages: { params: NoParams, result: ImageChoice[] };
   // Reads an image with a model, as a try: nothing is kept
-  tryImageModel: { params: { sourceId: number, fileId: string, model: Pick<AttachmentSettings, 'provider' | 'model' | 'ollamaUrl'> }, result: ImageTry };
-  // Ollama's models that read images
-  visionModels: { params: { ollamaUrl: string }, result: string[] };
+  tryImageModel: { params: { sourceId: number, fileId: string, model: LlmSettings }, result: ImageTry };
+  // The meetings a summary model can be tried on, the newest first
+  summaryTryMeetings: { params: NoParams, result: SummaryTryMeeting[] };
+  // A meeting's short summary by a model, to compare models: nothing is kept. Stopped with cancelSummary (its tryId)
+  trySummary: { params: { tryId: string, sourceId: number, sessionId: string, llm: LlmSettings }, result: SummaryTry };
+  // A task's models on every server and Gemini's with its key: those that read images, or that embed; the settings'
+  // one first though its server isn't reached
+  taskModels: { params: { task: ModelTask }, result: ModelChoice[] };
+  // The statistics of the AI's work since then, or of all of it
+  aiUsage: { params: { since: number | null }, result: AiUsage };
+  // The failed calls of a period, the newest 100
+  aiErrors: { params: AiErrorsQuery, result: AiError[] };
+  // The calls of a period by what they worked on, the newest 100; and what one made, null when it's gone
+  aiCalls: { params: AiErrorsQuery, result: AiCallGroup[] };
+  aiCallResult: { params: { item: string }, result: AiCallResult | null };
+  // The failed calls the errors list shows, deleted: how many
+  deleteAiErrors: { params: AiErrorsQuery, result: { deleted: number } };
   // Every image is read again, with the model set now
   readImagesAgain: { params: NoParams, result: { images: number } };
   // Stops the background AI work (images, summaries) for some minutes, or until resumed (null): the one running is
@@ -561,6 +841,27 @@ export interface CoreMethods {
   saveMeetingSeries: { params: { id?: number, name: string, matchers: SeriesMatcher[] }, result: { id: number } };
   deleteMeetingSeries: { params: { id: number }, result: null };
   setCloudAllowed: { params: { sourceId: number, allowed: boolean }, result: null };
+  // A messenger's new messages to the user get reply drafts from then on, with its unread ones of the last day
+  setRepliesEnabled: { params: { sourceId: number, enabled: boolean }, result: null };
+  // The drafts to review or being written, the newest first
+  drafts: { params: NoParams, result: DraftView[] };
+  // Dismissed: gone from the list. Written again: back in the queue, first
+  draftAction: { params: { draftId: number, action: 'dismiss' | 'rewrite' }, result: null };
+  draftLink: { params: { draftId: number }, result: string };
+  // A messenger's conversations with messages of the last days, the latest first, for a draft asked for by hand
+  draftableConversations: { params: NoParams, result: DraftableConversation[] };
+  // A draft of a reply to a conversation's last message from someone else, whatever the rules say
+  requestDraft: { params: { sourceId: number, roomId: string, threadId: string | null }, result: null };
+  draftLearning: { params: NoParams, result: DraftLearning };
+  // A server's models for text and for images, to check it and choose them in Settings (saved or not); a cloud
+  // provider's with its key
+  // error: what a cloud provider said when it refused (a wrong key)
+  serverModels: { params: { kind: AiServerKind, url: string }, result: { reachable: boolean, text: string[], images: string[], error?: string } };
+  // A saved server's queue on or off (the tray, Activity): server is its serverId
+  setServerQueue: { params: { server: string, queue: boolean }, result: null };
+  // A description of the user's style from their messages, by the answers' model (Ollama's for chats that may not go
+  // to cloud AI); not saved: Settings shows it to edit
+  describeStyle: { params: NoParams, result: string };
   // The embedding model is the one chosen, also while it's still being built
   getSettings: { params: NoParams, result: Settings };
   saveSettings: { params: Settings, result: Settings };
@@ -575,10 +876,12 @@ export interface CoreMethods {
 }
 
 // What the renderer may call: the core's methods but the links, with the main process's status and its own methods
-export interface AppMethods extends Omit<CoreMethods, 'status' | 'stenogramaLink' | 'chatLink'> {
+export interface AppMethods extends Omit<CoreMethods, 'status' | 'stenogramaLink' | 'chatLink' | 'draftLink'> {
   status: { params: NoParams, result: AppStatus };
   openInStenograma: { params: { sourceId: number, sessionId: string, startMs: number | null }, result: null };
   openInChat: { params: { documentId: string, messageId: string }, result: null };
+  // The message a draft answers, in the messenger
+  openDraftInChat: { params: { draftId: number }, result: null };
   // Starts the core now instead of waiting for its next restart
   restartCore: { params: NoParams, result: null };
 }
@@ -590,6 +893,8 @@ export type CoreEvent =
 
 export type AppEvent =
   | { type: 'status', status: AppStatus }
+  // From the main process: a page to show, as when a notification is clicked
+  | { type: 'navigate', page: 'drafts' }
   | { type: 'ask', askId: string, part: AskPart }
   | { type: 'summary', summaryId: string, part: SummaryPart };
 

@@ -77,6 +77,9 @@ export const toChatMessage = (message: RcMessage): ChatMessage | null => {
     return null;
   }
 
+  const mentions = [...new Set((message.mentions ?? []).map((mention) => mention.username)
+    .filter((username): username is string => Boolean(username) && username !== 'all' && username !== 'here'))];
+
   return {
     id: message._id,
     roomId: message.rid,
@@ -89,6 +92,7 @@ export const toChatMessage = (message: RcMessage): ChatMessage | null => {
     ...(quotes.length && { quotes }),
     ...(files.length && { files }),
     ...(sent.length && { attachments: sent }),
+    ...(mentions.length && { mentions }),
     ...(message.tcount && { startsThread: true }),
     ...(message.editedAt && { edited: true }),
   };

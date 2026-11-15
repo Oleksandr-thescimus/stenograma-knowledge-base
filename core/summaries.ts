@@ -34,13 +34,15 @@ export const saveSummary = (
 
 // The meetings of a named series from a time on without a short summary, newest first: their summaries are made in the
 // background, so a question about many of them is answered from one each
-export const meetingsToSummarize = (db: Db, since: number, skip: Set<string>, limit = 20) => (db.prepare(`
+// cloudOnly: for a cloud server's queue, the meetings of sources that may go to cloud AI only (F8)
+export const meetingsToSummarize = (db: Db, since: number, skip: Set<string>, limit = 20, { cloudOnly = false } = {}) => (db.prepare(`
   select d.id, d.source_id as sourceId, d.thread_id as sessionId from documents d
   where d.kind = 'meeting' and d.series_id is not null and d.created_at >= ?
     and not exists (select 1 from summaries s where s.document_id = d.id)
     and exists (select 1 from chunks c where c.document_id = d.id)
+    and (? = 0 or exists (select 1 from sources src where src.id = d.source_id and src.cloud_allowed = 1))
   order by d.created_at desc limit ?
-`).all(since, limit + skip.size) as { id: string, sourceId: number, sessionId: string }[]).filter((meeting) => !skip.has(meeting.id)).slice(0, limit);
+`).all(since, cloudOnly ? 1 : 0, limit + skip.size) as { id: string, sourceId: number, sessionId: string }[]).filter((meeting) => !skip.has(meeting.id)).slice(0, limit);
 
 // Waiting: those meetingsToSummarize would give, a meeting with no text isn't summarized
 export const summaryCounts = (db: Db, since: number) => db.prepare(`

@@ -235,6 +235,88 @@ const MIGRATIONS: (string | ((db: Db) => void))[] = [
   `
   alter table sources add column last_seen_at integer;
   `,
+  // Reply drafts (F9, M7), Rocket.Chat's first: one per message to the user it answers, the conversation being its thread
+  // or its room's main line (thread_id null). A room's read_at is when the user last read it in the messenger
+  `
+  alter table chat_rooms add column read_at integer;
+  create table drafts (
+    id integer primary key,
+    source_id integer not null references sources(id) on delete cascade,
+    room_id text not null,
+    thread_id text,
+    message_id text not null,
+    -- direct, mention, thread
+    reason text not null,
+    -- waiting, writing, ready, failed; then dismissed, replied (the user wrote in the conversation after it) or
+    -- superseded (a later message to the user in the same conversation got its own)
+    state text not null,
+    text text not null default '',
+    -- JSON CitedSource[]
+    sources text not null default '[]',
+    model text,
+    error text,
+    created_at integer not null,
+    updated_at integer not null,
+    unique (source_id, message_id)
+  );
+  create index drafts_state on drafts(state);
+  `,
+  // A draft the user asked for ("Draft a reply…", "Write again") is written while the background work is paused too
+  `
+  alter table drafts add column asked integer not null default 0;
+  `,
+  // The user's message that answered a draft, which teaches the next drafts their style
+  `
+  alter table drafts add column sent_message_id text;
+  `,
+  // The AI's work, a row per model call (never its text): kept a year, then in a day's totals (core/usage.ts)
+  `
+  create table ai_calls (
+    id integer primary key,
+    started_at integer not null,
+    ms integer not null,
+    -- answer, rewrite, summary, draft, image, style, embedding, search
+    task text not null,
+    provider text not null,
+    model text not null,
+    -- an Ollama server's address, else the provider
+    server text not null,
+    input_tokens integer,
+    output_tokens integer,
+    -- the chunks embedded; 1 else
+    items integer not null default 1,
+    -- null when it answered; else unreachable, timeout, aborted or failed
+    error text,
+    background integer not null
+  );
+  create index ai_calls_started on ai_calls(started_at);
+  create table ai_call_days (
+    day text not null,
+    task text not null,
+    provider text not null,
+    model text not null,
+    server text not null,
+    background integer not null,
+    calls integer not null,
+    ms integer not null,
+    input_tokens integer not null,
+    output_tokens integer not null,
+    -- the time of the calls that counted their output tokens, for the speed
+    counted_ms integer not null,
+    items integer not null,
+    errors integer not null,
+    primary key (day, task, provider, model, server, background)
+  );
+  `,
+  // A failed call's error as it said, cut short, to list the errors in the statistics; not kept in a day's totals
+  `
+  alter table ai_calls add column error_message text;
+  `,
+  // What a call worked on, by its ids (meeting:sourceId:sessionId, draft:id, file:sourceId:fileId), to name it in the
+  // list of errors
+  `
+  alter table ai_calls add column item text;
+  `,
 ];
 
 // sqlite-vec's path points inside app.asar in a packaged app, which SQLite's dlopen can't read (M0)

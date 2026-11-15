@@ -4,11 +4,15 @@ import { citedNumbers, formatSource, pickSources, prepareAnswer, type AnswerSour
 import { parseRewrite, rewriteQuestion } from '../../core/answer/rewrite.ts';
 import type { SearchHit } from '../../core/search.ts';
 import { DEFAULT_SETTINGS, type LlmSettings } from '../../core/settings.ts';
+import { answersLlm } from '../../core/servers.ts';
 import { saveRoom, setRoomMembers } from '../../core/chat/store.ts';
 import { createRocketChatSource } from '../../core/rocketchat/sync.ts';
 import { findOrCreateSource } from '../../core/sources.ts';
 import { estimateTokens } from '../../core/tokens.ts';
 import { createTestDb, type Db } from './helpers.ts';
+
+// The chat's model of the default settings: this computer's Ollama
+const DEFAULT_LLM = answersLlm(DEFAULT_SETTINGS);
 
 const replying = (text: string) => new MockLanguageModelV3({
   doGenerate: async () => ({
@@ -19,7 +23,7 @@ const replying = (text: string) => new MockLanguageModelV3({
   }),
 });
 
-const OLLAMA = DEFAULT_SETTINGS.llm;
+const OLLAMA = DEFAULT_LLM;
 const GROQ: LlmSettings = { ...OLLAMA, provider: 'groq', model: 'openai/gpt-oss-120b' };
 
 describe('the rewrite (F6)', () => {

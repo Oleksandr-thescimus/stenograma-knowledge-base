@@ -110,6 +110,10 @@ export const setRoomMembers = (db: Db, sourceId: number, roomId: string, members
 // A room's members as last read, for the answer's context
 export const roomMembers = (db: Db, sourceId: number, roomId: string) => getRoom(db, sourceId, roomId)?.members ?? [];
 
+// When the user last read the room in the messenger, for which messages to them are unread
+export const setRoomReadAt = (db: Db, sourceId: number, roomId: string, readAt: number | null) => db
+  .prepare('update chat_rooms set read_at = ? where source_id = ? and room_id = ?').run(readAt, sourceId, roomId);
+
 // Reading them failed for a reason of the room's (not allowed): tried again in a day
 export const markMembersRead = (db: Db, sourceId: number, roomId: string, now: number) => db
   .prepare('update chat_rooms set members_at = ? where source_id = ? and room_id = ?').run(now, sourceId, roomId);

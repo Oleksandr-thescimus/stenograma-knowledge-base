@@ -7,12 +7,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Stenograma KB is a personal knowledge base on this machine: meetings from the StenogramaAI browser extension, email
 and messenger chats, searched together, with answers that cite their sources and drafts of replies. An Electron app
 runs it. [docs/PLAN.md](docs/PLAN.md) is the plan: requirements, architecture, milestones and the dated decisions.
+[docs/rag.md](docs/rag.md) explains, in Ukrainian, how the search and answers work step by step: keep it current when they
+change.
 
 M0 (spikes) is done but for the checks that need the user; M1 (meetings in the terminal, `yarn kb`) is done. M2 (the
 extension pushes meetings) works with Chrome; Firefox and the extension's store release remain. M3 (the app: chat,
 sources, settings, tray) is built; its checks by hand remain (the plan's Decisions of 2026-11-03). Rocket.Chat, the
-first connector, went ahead of M3.5 (Decisions of 2026-11-12); its check on a real server and golden set remain. M3.5
-(the app, day to day) comes next, before M4.
+first connector, went ahead of M3.5 (Decisions of 2026-11-12); its check on a real server and golden set remain. Its
+reply drafts, M7 copied by hand, went ahead too (Decisions of 2026-11-14). M3.5 (the app, day to day) comes next,
+before M4.
 
 The extension is another repo, [stenograma](https://github.com/Oleksandr-thescimus/stenograma), checked out next to
 this one as `../stenograma`. The two meet only at the HTTP API, with no submodule or shared package. Open both with
@@ -50,16 +53,29 @@ Uses yarn (`yarn.lock`).
     cited meeting from the kept rows, and a source's list of meetings; `summaries.ts` keeps its short summary, made by `answer/summary.ts` (by hand, or in
     the background for a series's meetings) and indexed with it. `stenograma/series.ts`: meeting series by Meet code or
     weekday and time, named by the user, in the meetings' titles and `documents.series_id`.
-  - `connectors/runner.ts`: the sources a connector syncs, each on its timer, "Sync now", backoff after a failure.
+  - `connectors/runner.ts`: the sources a connector syncs, each on its timer, "Sync now", backoff after a failure, and
+    the rooms a watched source says changed, read at once.
   - `chat/`: messengers whatever the source (F3): `types.ts` (a message as kept), `store.ts` (`chat_rooms`,
     `chat_messages`, and their documents: a room's day, a thread, a file's text), `chunk.ts` (30-minute pauses, quotes
     as `> ` lines), `attachments.ts` (the files whose content is read, kept next to the database, never in the global
     data directory, so a test's never touch the real ones) and `read.ts` (an image by a vision model, a PDF with
     `unpdf`). The service reads them in a queue, after answers.
+  - `drafts/`: reply drafts (F9, M7; Rocket.Chat's first): `detect.ts` (which messages are to the user and still
+    unanswered, after each sync), `store.ts` (the `drafts` table), `style.ts` (the user's style: their replies to
+    similar messages, the drafts they rewrote, a description of how they write) and `write.ts` (the conversation, the
+    search's sources and the style as the prompt). The service writes them first in its background queue; nothing is sent.
   - `rocketchat/`: the REST API with its rate limits (`api.ts`), its rooms and messages as `chat/` keeps them
-    (`convert.ts`), a run of the sync with each room's cursors (`sync.ts`), and the runner's connector. Its token is in
+    (`convert.ts`), a run of the sync with each room's cursors (`sync.ts`), the realtime API that tells which rooms
+    changed (`realtime.ts`, DDP over a WebSocket; the tests give a fake one, or none), and the runner's connector. Its token is in
     the keyring under the knowledge base's id (`tokenSecretName`); the service takes `secrets` and `fetch`, which the
     tests replace (`tests/core/rocketchat-fake.ts`), so they never touch the real keyring or network.
+  - `servers.ts`: the AI servers (Ollama's API: this computer's, an Orange Pi's through a tunnel; Groq's and
+    Gemini's and Claude's), in the chat's order, each with its text and image models and its background queue (a lane each,
+    sharing the work), settings older than them made into servers, and whether a server answers.
+  - `ratelimit.ts`: a cloud provider's rate limits, from its refusals and its answers' headers, which the queue waits
+    out.
+  - `usage.ts`: the AI's statistics: a row per model call (`ai_calls`, never its text), kept by the service's
+    wrappers of every model and embedding provider, folded into a day's totals after a year.
   - `embed/`: providers (Ollama, Gemini), vector tables (bit vectors, rescored from `embedding_cache`), the cache and
     the queue. `llm.ts`, `answer/` (rewrite, answers, summaries), `secrets.ts` (keyring), `settings.ts`, `lock.ts`,
     `eval.ts`, `cli/kb.ts`.
@@ -74,9 +90,9 @@ Uses yarn (`yarn.lock`).
 - `app/preload`: exposes `window.kb` to the renderer through `contextBridge`: `invoke(method, params)` and `onEvent`.
   Its type, `KbApi` in `app/preload/api.ts`, is shared with the renderer. A new method goes into `core/protocol.ts`
   (`AppMethods`, and `CoreMethods` when the core answers it) and gets its zod schema in `app/main/ipc.ts`.
-- `app/renderer`: React, Tailwind and shadcn/ui. `@` is `app/renderer/src`: `pages/` (chat, sources, settings),
-  `components/`, `lib/` (`kb.tsx`: the status and events of `window.kb`). It imports from `core/` only `protocol.ts`
-  and `format.ts`, which `tsconfig.web.json` lists.
+- `app/renderer`: React, Tailwind and shadcn/ui. `@` is `app/renderer/src`: `pages/` (chat, reply drafts, sources,
+  activity: the background work; settings, in tabs), `components/`, `lib/` (`kb.tsx`: the status and events of `window.kb`). It imports from `core/` only
+  `protocol.ts` and `format.ts`, which `tsconfig.web.json` lists.
   - `src/index.css` holds the palette as the CSS variables shadcn/ui uses: Meet's (dark, the default) and MUI's light
     one, both from the extension's `helpers/theme.ts`.
   - Components come from `npx shadcn@latest add <name>` into `src/components/ui` (`components.json`). Run

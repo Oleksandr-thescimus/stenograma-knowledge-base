@@ -17,12 +17,16 @@ export interface RcSubscription {
   t: string;
   prid?: string;
   archived?: boolean;
+  // When the user last read the room
+  ls?: string;
 }
 
 export interface RcRoom {
   _id: string;
   t: string;
   lm?: string;
+  // Its messages, all of them
+  msgs?: number;
   usersCount?: number;
   _updatedAt?: string;
 }
@@ -62,6 +66,8 @@ export interface RcMessage {
   attachments?: RcAttachment[];
   files?: RcFile[];
   file?: RcFile;
+  // The people a message mentions; @all and @here are mentions too, by those usernames
+  mentions?: { _id: string, username?: string }[];
 }
 
 export interface RcMember {
@@ -95,6 +101,8 @@ export interface ApiOptions {
   signal?: AbortSignal;
   // Calls of each endpoint a minute, at most, besides the server's own limit
   requestsPerMinute?: number;
+  // What's counted of the limits, shared by the clients of one source's runs (a run every few seconds while live)
+  limits?: ApiLimits;
   // Tests don't wait out a rate limit
   wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
@@ -124,15 +132,21 @@ export const normalizeServerUrl = (url: string) => {
   return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`;
 };
 
+export interface ApiLimits {
+  // An endpoint with no calls left, until its limit resets
+  resets: Map<string, number>;
+  // The calls of each endpoint in the last minute, for our own limit
+  recent: Map<string, number[]>;
+}
+
+export const createApiLimits = (): ApiLimits => ({ resets: new Map(), recent: new Map() });
+
 export const createRocketChatApi = (
   access: { serverUrl: string, userId: string, token: string },
-  { fetch: fetchImpl = globalThis.fetch, signal, wait = sleep, now = Date.now, requestsPerMinute }: ApiOptions = {},
+  { fetch: fetchImpl = globalThis.fetch, signal, wait = sleep, now = Date.now, requestsPerMinute, limits = createApiLimits() }: ApiOptions = {},
 ) => {
   const base = `${normalizeServerUrl(access.serverUrl)}/api/v1/`;
-  // An endpoint with no calls left, until its limit resets
-  const resets = new Map<string, number>();
-  // The calls of each endpoint in the last minute, for our own limit
-  const recent = new Map<string, number[]>();
+  const { resets, recent } = limits;
 
   const keepOwnLimit = async (endpoint: string) => {
     if (!requestsPerMinute) {

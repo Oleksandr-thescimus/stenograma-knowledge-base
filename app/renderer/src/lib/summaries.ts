@@ -1,17 +1,9 @@
 import type { SummaryStatus } from '../../../../core/protocol';
+import { leftMs } from './activity';
 
-// The time the waiting summaries will take, by the average of the model's last ones: the one being made counts what's
-// left of it. Null before a summary was timed, or with none to make
-export const summariesLeftMs = (status: SummaryStatus, now: number) => {
-  const { averageMs, current } = status;
-  const waiting = status.pending - status.skipped - (current ? 1 : 0);
-
-  if (averageMs === null || (waiting <= 0 && !current)) {
-    return null;
-  }
-
-  return (Math.max(0, waiting) * averageMs) + (current ? Math.max(0, averageMs - (now - current.startedAt)) : 0);
-};
+// The time the waiting summaries will take, the servers at work together, by the average of their models' last ones.
+// Null before a summary was timed, or with none to make
+export const summariesLeftMs = (status: SummaryStatus, now: number) => leftMs(status.pending - status.skipped, status.servers, now);
 
 // The model call going on: a part's notes, or the summary when it's the last
 export const summaryStep = ({ done, all }: { done: number, all: number }) => (done + 1 >= all

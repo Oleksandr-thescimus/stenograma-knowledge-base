@@ -45,11 +45,12 @@ const PAUSES = [0, 1, 3, 10, 30];
 const LimitsFields = ({ limits, onChange }: { limits: SyncLimits, onChange: (limits: SyncLimits) => void }) => (
   <details className="rounded-md border px-3 py-2">
     <summary className="cursor-pointer text-sm">
-      Load on the server: every {limits.intervalMinutes} min, at most {limits.requestsPerMinute} calls a minute, {limits.filePauseSeconds} s between files
+      Load on the server: live, else every {limits.intervalMinutes} min, at most {limits.requestsPerMinute} calls a minute, {limits.filePauseSeconds} s between files
     </summary>
+    {/* The fields on one line, whatever their labels' length */}
     <div className="mt-3 grid gap-3 sm:grid-cols-3">
-      <div className="space-y-1">
-        <Label>Sync every</Label>
+      <div className="flex flex-col justify-end gap-1">
+        <Label title="While the realtime connection is up, new messages arrive as they're sent and the whole sync runs every 30 minutes">Sync every, not live</Label>
         <Select value={String(limits.intervalMinutes)} onValueChange={(value) => onChange({ ...limits, intervalMinutes: Number(value) })}>
           <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
@@ -57,7 +58,7 @@ const LimitsFields = ({ limits, onChange }: { limits: SyncLimits, onChange: (lim
           </SelectContent>
         </Select>
       </div>
-      <div className="space-y-1">
+      <div className="flex flex-col justify-end gap-1">
         <Label htmlFor="rc-rpm">Calls a minute, each kind</Label>
         <Input
           id="rc-rpm"
@@ -68,7 +69,7 @@ const LimitsFields = ({ limits, onChange }: { limits: SyncLimits, onChange: (lim
           onChange={(event) => onChange({ ...limits, requestsPerMinute: Math.min(30, Math.max(1, Math.round(Number(event.target.value) || 1))) })}
         />
       </div>
-      <div className="space-y-1">
+      <div className="flex flex-col justify-end gap-1">
         <Label>Pause between files</Label>
         <Select value={String(limits.filePauseSeconds)} onValueChange={(value) => onChange({ ...limits, filePauseSeconds: Number(value) })}>
           <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
@@ -79,6 +80,9 @@ const LimitsFields = ({ limits, onChange }: { limits: SyncLimits, onChange: (lim
       </div>
     </div>
     <p className="mt-2 text-xs text-muted-foreground">
+      Live: Rocket.Chat&apos;s realtime connection tells which rooms got a new message, and only those are read, at once; the
+      whole sync then runs every 30 minutes. Without it (not reached, or cut), every {limits.intervalMinutes} minutes.
+      The calls a minute count every read, the live ones too: more rooms changed in a minute wait for the next one.
       Rocket.Chat allows 10 calls a minute of each kind from an address by default, shared by everyone on the same
       network: staying below leaves room for colleagues. A first read takes about a minute per 5 rooms or 5,000 messages.
     </p>
@@ -194,7 +198,7 @@ const RocketChatDialog = ({ open, sourceId, onClose, onBack }: RocketChatDialogP
             <DialogDescription>
               {accessStep
                 ? TOKEN_HELP
-                : user ?? `Messages are read every ${limits.intervalMinutes} minutes. They go to cloud AI only once "May go to cloud AI" is on.`}
+                : user ?? `New messages arrive as they're sent, over Rocket.Chat's realtime connection, or every ${limits.intervalMinutes} minutes without it. They go to cloud AI only once "May go to cloud AI" is on.`}
             </DialogDescription>
           </div>
         </DialogHeader>
@@ -227,10 +231,12 @@ const RocketChatDialog = ({ open, sourceId, onClose, onBack }: RocketChatDialogP
                 <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {editing && since !== null && <SelectItem value="keep">{since ? `${formatDay(since)}, as now` : 'Everything, as now'}</SelectItem>}
-                  {PERIODS.map(({ value, label }) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+                  {/* "Everything" is the kept one when it's everything already */}
+                  {PERIODS.filter(({ value }) => !(editing && since === 0 && value === 'all'))
+                    .map(({ value, label }) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
                 </SelectContent>
               </Select>
-              {editing && period !== 'keep' && since !== null && (
+              {editing && since !== null && periodSince() !== since && (
                 <p className="text-xs text-muted-foreground">
                   {periodSince() < since ? 'The rooms are read again from the new start.' : 'Messages before the new start are removed.'}
                 </p>

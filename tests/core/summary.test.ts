@@ -5,6 +5,7 @@ import {
   meetingLanguage, splitIntoParts, summarizeTranscript, summaryInputBudget, type SummaryCall,
 } from '../../core/answer/summary.ts';
 import { DEFAULT_SETTINGS, type LlmSettings } from '../../core/settings.ts';
+import { answersLlm } from '../../core/servers.ts';
 import { findOrCreateSource } from '../../core/sources.ts';
 import { ingestBundles, meetingDocumentId, reconcileSessions } from '../../core/stenograma/ingest.ts';
 import { getMeeting, meetingLines } from '../../core/stenograma/meeting.ts';
@@ -12,13 +13,16 @@ import { averageSummaryMs, lastSummaryModel, saveSummary, textHash } from '../..
 import { estimateTokens } from '../../core/tokens.ts';
 import { bundle, createTestDb, message, type Db } from './helpers.ts';
 
+// The chat's model of the default settings: this computer's Ollama
+const DEFAULT_LLM = answersLlm(DEFAULT_SETTINGS);
+
 // "Summarize" in the meeting view: a short summary of a whole meeting, in parts when it doesn't fit the model, kept
 // with the meeting until its text changes
 
 const USAGE = { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } };
 const FINISH = { unified: 'stop', raw: 'stop' } as const;
-const GEMINI: LlmSettings = { ...DEFAULT_SETTINGS.llm, provider: 'gemini', model: 'gemini-2.5-flash' };
-const GROQ: LlmSettings = { ...DEFAULT_SETTINGS.llm, provider: 'groq', model: 'openai/gpt-oss-120b' };
+const GEMINI: LlmSettings = { ...DEFAULT_LLM, provider: 'gemini', model: 'gemini-2.5-flash' };
+const GROQ: LlmSettings = { ...DEFAULT_LLM, provider: 'groq', model: 'openai/gpt-oss-120b' };
 
 // Notes for each part, then the summary streamed
 const summarizer = (summary: string[]) => {

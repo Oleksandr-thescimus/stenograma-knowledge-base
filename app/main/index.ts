@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray } from 'electron';
 import type { AppEvent, AppStatus, CoreMethods, CoreStatus, ProcessStatus } from '../../core/protocol';
 import windowIconPath from '../../resources/icon.png?asset';
 import trayIconPath from '../../resources/tray.png?asset';
@@ -49,6 +49,18 @@ const describeProcess = (status: ProcessStatus) => {
   }
 };
 
+// The window opens maximized the first time it's shown
+let shownOnce = false;
+
+// GNOME on X11 ignores maximizing a window it hasn't mapped yet, even right after show(): once it's shown, and again a
+// moment later
+const maximizeWhenShown = (window: BrowserWindow) => {
+  window.once('show', () => {
+    window.maximize();
+    setTimeout(() => !window.isDestroyed() && !window.isMaximized() && window.maximize(), 300);
+  });
+};
+
 const showWindow = () => {
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow(true);
@@ -58,6 +70,12 @@ const showWindow = () => {
 
   if (mainWindow.isMinimized()) {
     mainWindow.restore();
+  }
+
+  // Maximized the first time it's shown (it starts hidden in the tray at login); as the user left it after that
+  if (!shownOnce) {
+    shownOnce = true;
+    maximizeWhenShown(mainWindow);
   }
 
   mainWindow.show();
@@ -78,6 +96,29 @@ const imagesItem = (): Electron.MenuItemConstructorOptions[] => {
   return attachments.paused
     ? [{ label: 'Resume the background AI work', click: () => call('resumeBackground', {}) }]
     : [{ label: 'Pause the background AI work for an hour', click: () => call('pauseBackground', { minutes: 60 }) }];
+};
+
+// Each AI server's background queue on or off (Settings → AI models): another server takes the work of one turned off
+const backgroundServerItem = (): Electron.MenuItemConstructorOptions[] => {
+  const ai = coreStatus?.ai;
+
+  // The servers with a model for some of the background work, their queue on or off
+  const servers = ai?.lanes.filter((lane) => lane.takes.length > 0) ?? [];
+
+  if (!servers.length || core.getStatus().state !== 'running') {
+    return [];
+  }
+
+  return [{
+    label: 'Background AI queue',
+    submenu: servers.map((lane) => ({
+      label: `${lane.name}${lane.reachable === false ? ' (not reached)' : ''}`,
+      type: 'checkbox' as const,
+      checked: lane.queue,
+      click: () => core.invoke('setServerQueue', { server: lane.id, queue: !lane.queue })
+        .catch((error: unknown) => console.error(`setServerQueue: ${(error as Error).message}`)),
+    })),
+  }];
 };
 
 // Starting at login is set in the tray, where the app stays. Only a packaged app starts at login: the dev build's
@@ -104,7 +145,7 @@ const updateTray = (status: ProcessStatus = core.getStatus()) => {
   }
 
   // Built again only when it changes: the core's status comes often
-  const key = JSON.stringify([describeProcess(status), coreStatus?.attachments.paused, status.state, startAtLogin]);
+  const key = JSON.stringify([describeProcess(status), coreStatus?.attachments.paused, coreStatus?.ai.lanes.map((lane) => [lane.id, lane.name, lane.queue, lane.takes, lane.reachable]), status.state, startAtLogin]);
 
   if (key === trayKey) {
     return;
@@ -117,6 +158,7 @@ const updateTray = (status: ProcessStatus = core.getStatus()) => {
     { type: 'separator' },
     { label: describeProcess(status), enabled: false },
     ...imagesItem(),
+    ...backgroundServerItem(),
     { type: 'separator' },
     startAtLoginItem(),
     { type: 'separator' },
@@ -124,10 +166,34 @@ const updateTray = (status: ProcessStatus = core.getStatus()) => {
   ]));
 };
 
+// A notification when a reply draft is ready (F9): how many, never the message, which shows on the screen of a computer
+// others may see. A click opens the drafts
+let draftsReady: number | null = null;
+
+const notifyDrafts = (status: CoreStatus) => {
+  const { ready } = status.drafts;
+
+  if (draftsReady !== null && ready > draftsReady && Notification.isSupported()) {
+    const notification = new Notification({
+      title: 'Stenograma KB',
+      body: ready === 1 ? 'A reply draft is ready to review' : `${ready} reply drafts are ready to review`,
+      icon: windowIconPath,
+    });
+    notification.on('click', () => {
+      showWindow();
+      sendToRenderer({ type: 'navigate', page: 'drafts' });
+    });
+    notification.show();
+  }
+
+  draftsReady = ready;
+};
+
 const core = createCoreSupervisor({
   entry: coreHostPath,
   onEvent: (event) => {
     if (event.type === 'status') {
+      notifyDrafts(event.status);
       coreStatus = event.status;
       sendToRenderer({ type: 'status', status: appStatus() });
       updateTray();
@@ -165,9 +231,10 @@ const applyStartAtLogin = (enabled: boolean) => {
 };
 
 function createWindow(show: boolean) {
+  // The screen's work area, should the window manager not maximize it
+  const { workArea } = screen.getPrimaryDisplay();
   const window = new BrowserWindow({
-    width: 1100,
-    height: 760,
+    ...workArea,
     minWidth: 720,
     minHeight: 480,
     show: false,
@@ -185,7 +252,11 @@ function createWindow(show: boolean) {
   mainWindow = window;
 
   if (show) {
-    window.once('ready-to-show', () => window.show());
+    window.once('ready-to-show', () => {
+      shownOnce = true;
+      maximizeWhenShown(window);
+      window.show();
+    });
   }
 
   // Closing the window keeps the app in the tray, syncing; Quit in the tray's menu stops it
@@ -242,6 +313,10 @@ ipcMain.handle('kb:call', async (event, method: unknown, params: unknown) => {
       return null;
     case 'openInChat':
       openExternally(await core.invoke('chatLink', call.params));
+
+      return null;
+    case 'openDraftInChat':
+      openExternally(await core.invoke('draftLink', call.params));
 
       return null;
     case 'saveSettings': {

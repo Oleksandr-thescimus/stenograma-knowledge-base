@@ -1,29 +1,34 @@
-import { useState } from 'react';
-import { Database, MessageSquare, RotateCw, Settings as SettingsIcon } from 'lucide-react';
+import { useCallback, useState } from 'react';
+import { Activity, Database, MessageSquare, MessageSquareReply, RotateCw, Settings as SettingsIcon } from 'lucide-react';
 import { cn } from 'cn';
-import type { AppStatus } from '../../../core/protocol';
+import type { AppEvent, AppStatus } from '../../../core/protocol';
 import { Button } from '@/components/ui/button';
 import ChatList from '@/components/ChatList';
 import StatusLine from '@/components/StatusLine';
-import type { SourcesTab } from '@/lib/status';
+import type { StatusPage } from '@/lib/status';
 import { useChats } from '@/lib/chats';
-import { useAppStatus } from '@/lib/kb';
+import { useAppStatus, useKbEvents } from '@/lib/kb';
 import { formatTime } from '@/lib/format';
+import ActivityPage from '@/pages/ActivityPage';
 import ChatPage from '@/pages/ChatPage';
+import DraftsPage from '@/pages/DraftsPage';
 import SettingsPage from '@/pages/SettingsPage';
 import SourcesPage from '@/pages/SourcesPage';
 
-// The app's window (docs/PLAN.md, M3): the chat with the saved chats in the sidebar, the sources and the settings. Pages
+// The app's window (docs/PLAN.md, M3): the chat with the saved chats in the sidebar, the reply drafts, the sources, the
+// background work and the settings. Pages
 // stay mounted, so an answer goes on coming while another page is open
 
-type Page = 'chat' | 'sources' | 'settings';
+type Page = 'chat' | 'drafts' | 'sources' | 'activity' | 'settings';
 
 const TOP_PAGES: { id: Page, label: string, icon: typeof MessageSquare }[] = [
   { id: 'chat', label: 'Chat', icon: MessageSquare },
+  { id: 'drafts', label: 'Reply drafts', icon: MessageSquareReply },
 ];
 
 const BOTTOM_PAGES: { id: Page, label: string, icon: typeof MessageSquare }[] = [
   { id: 'sources', label: 'Sources', icon: Database },
+  { id: 'activity', label: 'Activity', icon: Activity },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -33,12 +38,15 @@ const PageButton = ({
   icon: Icon,
   active,
   onClick,
+  count,
 }: {
   id: Page,
   label: string,
   icon: typeof MessageSquare,
   active: boolean,
   onClick: (id: Page) => void,
+  // Things waiting there, e.g. drafts to review
+  count?: number,
 }) => (
   <button
     type="button"
@@ -50,6 +58,7 @@ const PageButton = ({
   >
     <Icon className="size-4" />
     {label}
+    {Boolean(count) && <span className="ml-auto rounded-full bg-primary px-1.5 text-xs text-primary-foreground">{count}</span>}
   </button>
 );
 
@@ -80,7 +89,6 @@ const ProcessBanner = ({ status }: { status: AppStatus }) => {
 const App = () => {
   const status = useAppStatus();
   const [page, setPage] = useState<Page>('chat');
-  const [sourcesTab, setSourcesTab] = useState<SourcesTab>('sources');
   const chats = useChats(status?.process.state === 'running');
 
   // While an answer comes, its chat stays open (the list allows only it)
@@ -92,10 +100,13 @@ const App = () => {
     setPage('chat');
   };
 
-  const openSources = (tab: SourcesTab) => {
-    setSourcesTab(tab);
-    setPage('sources');
-  };
+
+  // A notification of a reply draft opens the drafts
+  useKbEvents(useCallback((event: AppEvent) => {
+    if (event.type === 'navigate') {
+      setPage(event.page);
+    }
+  }, []));
 
   return (
     <div className="flex h-screen bg-canvas text-foreground">
@@ -103,7 +114,13 @@ const App = () => {
         <h1 className="mb-4 px-2 pt-1 text-lg font-medium">Stenograma KB</h1>
         <div className="space-y-1">
           {TOP_PAGES.map((item) => (
-            <PageButton key={item.id} {...item} active={page === item.id} onClick={setPage} />
+            <PageButton
+              key={item.id}
+              {...item}
+              active={page === item.id}
+              onClick={setPage}
+              count={item.id === 'drafts' ? status?.core?.drafts.ready : undefined}
+            />
           ))}
         </div>
         <ChatList chats={chats} onChoose={chooseChat} />
@@ -112,14 +129,16 @@ const App = () => {
             <PageButton key={item.id} {...item} active={page === item.id} onClick={setPage} />
           ))}
         </div>
-        <StatusLine status={status} onOpen={openSources} />
+        <StatusLine status={status} onOpen={(target: StatusPage) => setPage(target)} />
       </nav>
       <main className="flex min-w-0 flex-1 flex-col bg-background">
         {status && <ProcessBanner status={status} />}
         <div className="min-h-0 flex-1">
           <div className={cn('h-full', page !== 'chat' && 'hidden')}><ChatPage chats={chats} /></div>
-          <div className={cn('h-full', page !== 'sources' && 'hidden')}><SourcesPage tab={sourcesTab} onTab={setSourcesTab} /></div>
-          <div className={cn('h-full', page !== 'settings' && 'hidden')}><SettingsPage /></div>
+          <div className={cn('h-full', page !== 'drafts' && 'hidden')}><DraftsPage onOpenSources={() => setPage('sources')} /></div>
+          <div className={cn('h-full', page !== 'sources' && 'hidden')}><SourcesPage /></div>
+          <div className={cn('h-full', page !== 'activity' && 'hidden')}><ActivityPage links={{ onOpenChat: chooseChat, onOpenDrafts: () => setPage('drafts') }} /></div>
+          <div className={cn('h-full', page !== 'settings' && 'hidden')}><SettingsPage onOpenActivity={() => setPage('activity')} /></div>
         </div>
       </main>
     </div>

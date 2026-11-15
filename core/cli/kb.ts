@@ -21,6 +21,7 @@ import { createRocketChatApi } from '../rocketchat/api.ts';
 import { readConfig, ROCKETCHAT_KIND, syncRocketChat, tokenSecretName } from '../rocketchat/sync.ts';
 import { deleteSecret, getSecret, setSecret } from '../secrets.ts';
 import { loadSettings } from '../settings.ts';
+import { answersLlm } from '../servers.ts';
 import { findOrCreateOnlySource, listSources, markSynced, removeSource, setCloudAllowed } from '../sources.ts';
 import { bundlesFromBackup, readBackup } from '../stenograma/backup.ts';
 import { ingestBundles, reconcileSessions } from '../stenograma/ingest.ts';
@@ -34,7 +35,7 @@ const USAGE = `Usage: yarn kb <command>
   search <query>       Hybrid search. --source <kind>, --from/--to <YYYY-MM-DD>, --person <name>, --limit <n>
   ask <question>       An answer with citations, by the LLM of settings.json. Dates and a person are taken from the
                        question; --source, --from, --to and --person set them instead
-  key set|delete <groq|gemini>
+  key set|delete <groq|gemini|anthropic>
                        Keep an LLM key in the keyring (typed without echo), or remove it
   eval                 Recall@10 and MRR on the golden set (--golden <path>, default ${goldenSetPath()})
   serve                The API for the extension on 127.0.0.1 (the port in settings.json), embedding what it pushes
@@ -231,10 +232,12 @@ const commands: Record<string, () => Promise<void>> = {
     }
 
     const settings = loadSettings();
-    const model = createLanguageModel(settings.llm);
+    // The chat's model: the first server's with one (Settings → AI models)
+    const llm = answersLlm(settings);
+    const model = createLanguageModel(llm);
     const request: SearchRequest = values.source || values.from || values.to || values.person
       ? { query: question, from: parseDay(values.from), to: parseDay(values.to, true), person: values.person }
-      : await rewriteQuestion(model, settings.llm, question);
+      : await rewriteQuestion(model, llm, question);
     console.log(`Searching for: ${request.query}${describeRequest(request)}`);
 
     const { query, ...filters } = request;
@@ -246,7 +249,7 @@ const commands: Record<string, () => Promise<void>> = {
       console.log(warning);
     }
 
-    const prepared = prepareAnswer(db, settings.llm, question, hits);
+    const prepared = prepareAnswer(db, llm, question, hits);
     const leftOut = prepared.leftOut ? `${prepared.leftOut} found chunks were left out: their sources don't allow a cloud LLM (F8)` : '';
 
     if (!prepared.sources.length) {
@@ -255,10 +258,10 @@ const commands: Record<string, () => Promise<void>> = {
       return;
     }
 
-    console.log(`Answering with ${settings.llm.provider} ${settings.llm.model}${isLocalLlm(settings.llm) ? ' (local)' : ''} from ${prepared.sources.length} chunks\n`);
+    console.log(`Answering with ${llm.provider} ${llm.model}${isLocalLlm(llm) ? ' (local)' : ''} from ${prepared.sources.length} chunks\n`);
 
     let streamError: unknown;
-    const result = streamAnswer(model, settings.llm, prepared, (error) => {
+    const result = streamAnswer(model, llm, prepared, (error) => {
       streamError = error;
     });
     let answer = '';
@@ -289,8 +292,8 @@ const commands: Record<string, () => Promise<void>> = {
   key: async () => {
     const [action, provider] = args;
 
-    if (!['set', 'delete'].includes(action) || !['groq', 'gemini'].includes(provider)) {
-      throw new Error('Usage: yarn kb key set|delete <groq|gemini>');
+    if (!['set', 'delete'].includes(action) || !['groq', 'gemini', 'anthropic'].includes(provider)) {
+      throw new Error('Usage: yarn kb key set|delete <groq|gemini|anthropic>');
     }
 
     if (action === 'delete') {

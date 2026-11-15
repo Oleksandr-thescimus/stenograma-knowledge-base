@@ -7,6 +7,7 @@ import { MAX_RESTART_DELAY_MS, nextAttempt, restartDelay } from '../../app/main/
 import { checkCall } from '../../app/main/ipc.ts';
 import { DEFAULT_SETTINGS } from '../../core/settings.ts';
 
+
 describe('restarting the core', () => {
   it('waits longer after each exit, up to a minute', () => {
     expect([1, 2, 3, 4, 7, 20].map(restartDelay)).toEqual([1000, 2000, 4000, 8000, MAX_RESTART_DELAY_MS, MAX_RESTART_DELAY_MS]);
@@ -93,7 +94,8 @@ describe('the renderer\'s calls', () => {
     expect(() => checkCall('saveSettings', { ...DEFAULT_SETTINGS, attachments: { ...DEFAULT_SETTINGS.attachments, months: -1 } })).toThrow();
     expect(() => checkCall('attachmentImage', { sourceId: 1, fileId: 'f', path: '/etc/passwd' })).toThrow();
     expect(() => checkCall('saveSettings', { ...DEFAULT_SETTINGS, server: { port: 22 } })).toThrow();
-    expect(() => checkCall('saveSettings', { ...DEFAULT_SETTINGS, llm: { ...DEFAULT_SETTINGS.llm, ollamaUrl: 'not a url' } })).toThrow();
+    expect(() => checkCall('saveSettings', { ...DEFAULT_SETTINGS, servers: [{ ...DEFAULT_SETTINGS.servers[0], url: 'not a url' }] })).toThrow();
+    expect(() => checkCall('saveSettings', { ...DEFAULT_SETTINGS, servers: [{ ...DEFAULT_SETTINGS.servers[0], model: 'm' }] })).toThrow();
     expect(() => checkCall('openInStenograma', { sourceId: 1, sessionId: 's', startMs: 1, url: 'file:///etc/passwd' })).toThrow();
   });
 });

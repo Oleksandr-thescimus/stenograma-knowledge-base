@@ -124,14 +124,20 @@ export interface PendingFilter {
   kinds: AttachmentKind[];
   // Files sent before it wait: the period read is shorter than the messages'
   since: number;
+  // Taken by another server's queue, as sourceId:fileId
+  exclude?: string[];
+  // Only of the sources that may go to cloud AI (F8): for a cloud server's queue
+  cloudOnly?: boolean;
 }
 
 // The next file to read: the newest
-export const nextPending = (db: Db, { kinds, since }: PendingFilter) => (kinds.length ? db.prepare(`
-  select ${COLUMNS} from chat_attachments
+export const nextPending = (db: Db, { kinds, since, exclude = [], cloudOnly = false }: PendingFilter) => (kinds.length ? db.prepare(`
+  select ${COLUMNS} from chat_attachments a
   where state = 'pending' and ts >= ? and kind in (select value from json_each(?))
+    and (source_id || ':' || file_id) not in (select value from json_each(?))
+    and (? = 0 or exists (select 1 from sources s where s.id = a.source_id and s.cloud_allowed = 1))
   order by ts desc limit 1
-`).get(since, JSON.stringify(kinds)) : undefined) as AttachmentRow | undefined;
+`).get(since, JSON.stringify(kinds), JSON.stringify(exclude), cloudOnly ? 1 : 0) : undefined) as AttachmentRow | undefined;
 
 export const countAttachments = (db: Db, { kinds, since }: PendingFilter) => {
   const rows = db.prepare(`

@@ -133,7 +133,7 @@ const MeetingDialog = ({ source, onClose }: MeetingDialogProps) => {
 
   return (
     <Dialog open={Boolean(source)} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="flex h-[85vh] max-w-3xl flex-col gap-0 p-0 sm:max-w-3xl">
+      <DialogContent className="flex h-[85vh] max-w-3xl flex-col gap-0 p-0 sm:max-w-3xl xl:max-w-5xl">
         <DialogHeader className="border-b p-4 pr-12">
           <DialogTitle>{meeting?.title ?? source?.title}</DialogTitle>
           <DialogDescription>

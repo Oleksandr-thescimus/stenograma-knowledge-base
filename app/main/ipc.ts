@@ -11,9 +11,25 @@ const MS = z.number().int().nonnegative();
 const BROWSER = z.enum(['chrome', 'firefox', 'edge', 'brave', 'opera', 'other']);
 
 const EMBEDDING = z.object({ provider: z.enum(['ollama', 'gemini']), model: z.string().min(1).max(200), ollamaUrl: z.url().max(500) }).strict();
-const LLM = z.object({ provider: z.enum(['groq', 'gemini', 'ollama']), model: z.string().min(1).max(200), ollamaUrl: z.url().max(500) }).strict();
-const KEY_PROVIDER = z.enum(['groq', 'gemini']);
-const VISION = { provider: z.enum(['ollama', 'gemini']), model: z.string().min(1).max(200), ollamaUrl: z.url().max(500) };
+// A cloud model has no Ollama address
+const LLM = z.object({
+  provider: z.enum(['groq', 'gemini', 'anthropic', 'ollama']), model: z.string().min(1).max(200), ollamaUrl: z.union([z.url().max(500), z.literal('')]),
+}).strict();
+const KEY_PROVIDER = z.enum(['groq', 'gemini', 'anthropic']);
+const SERVER_KIND = z.enum(['ollama', 'groq', 'gemini', 'anthropic']);
+const AI_SERVER = z.object({
+  name: z.string().trim().min(1).max(100),
+  kind: SERVER_KIND,
+  url: z.union([z.url({ protocol: /^https?$/ }).max(500), z.literal('')]),
+  text: z.string().max(200),
+  images: z.string().max(200),
+  queue: z.boolean(),
+}).strict();
+const AI_CALLS_QUERY = z.object({
+  since: z.number().int().min(0).nullable(),
+  task: z.enum(['answer', 'rewrite', 'summary', 'draft', 'image', 'style', 'embedding', 'search']).nullable().optional(),
+  model: z.object({ provider: z.string().max(20), model: z.string().max(200), server: z.string().max(500) }).strict().nullable().optional(),
+}).strict();
 const FILE = { sourceId: ID, fileId: z.string().min(1).max(200) };
 const MEETING = z.object({ sourceId: ID, sessionId: z.string().min(1).max(1000) }).strict();
 const DOCUMENT_ID = z.string().min(1).max(1000);
@@ -75,8 +91,16 @@ export const PARAMS: { [M in keyof AppMethods]: z.ZodType<AppMethods[M]['params'
   conversation: z.object({ documentId: DOCUMENT_ID, startMs: MS.nullable() }).strict(),
   attachmentImage: z.object(FILE).strict(),
   recentImages: NO_PARAMS,
-  tryImageModel: z.object({ ...FILE, model: z.object(VISION).strict() }).strict(),
-  visionModels: z.object({ ollamaUrl: z.url().max(500) }).strict(),
+  // Groq reads no images
+  tryImageModel: z.object({ ...FILE, model: LLM.extend({ provider: z.enum(['ollama', 'gemini', 'anthropic']) }).strict() }).strict(),
+  summaryTryMeetings: NO_PARAMS,
+  trySummary: MEETING.extend({ tryId: z.string().min(1).max(100), llm: LLM }).strict(),
+  taskModels: z.object({ task: z.enum(['images', 'embeddings']) }).strict(),
+  aiUsage: z.object({ since: z.number().int().min(0).nullable() }).strict(),
+  aiErrors: AI_CALLS_QUERY,
+  aiCalls: AI_CALLS_QUERY,
+  aiCallResult: z.object({ item: z.string().min(1).max(1200) }).strict(),
+  deleteAiErrors: AI_CALLS_QUERY,
   readImagesAgain: NO_PARAMS,
   pauseBackground: z.object({ minutes: z.number().int().min(1).max(7 * 24 * 60).nullable() }).strict(),
   resumeBackground: NO_PARAMS,
@@ -95,12 +119,23 @@ export const PARAMS: { [M in keyof AppMethods]: z.ZodType<AppMethods[M]['params'
   }).strict(),
   deleteMeetingSeries: z.object({ id: ID }).strict(),
   setCloudAllowed: z.object({ sourceId: ID, allowed: z.boolean() }).strict(),
+  setRepliesEnabled: z.object({ sourceId: ID, enabled: z.boolean() }).strict(),
+  drafts: NO_PARAMS,
+  draftAction: z.object({ draftId: ID, action: z.enum(['dismiss', 'rewrite']) }).strict(),
+  openDraftInChat: z.object({ draftId: ID }).strict(),
+  draftableConversations: NO_PARAMS,
+  draftLearning: NO_PARAMS,
+  serverModels: z.object({ kind: SERVER_KIND, url: z.union([z.url({ protocol: /^https?$/ }).max(500), z.literal('')]) }).strict(),
+  setServerQueue: z.object({ server: z.string().min(1).max(500), queue: z.boolean() }).strict(),
+  describeStyle: NO_PARAMS,
+  requestDraft: z.object({ sourceId: ID, roomId: z.string().min(1).max(200), threadId: z.string().min(1).max(200).nullable() }).strict(),
   getSettings: NO_PARAMS,
   saveSettings: z.object({
-    attachments: z.object({ ...VISION, describeImages: z.boolean(), readDocuments: z.boolean(), months: z.number().int().min(0).max(120) }).strict(),
+    servers: z.array(AI_SERVER).min(1).max(20),
+    attachments: z.object({ describeImages: z.boolean(), readDocuments: z.boolean(), months: z.number().int().min(0).max(120) }).strict(),
     summaries: z.object({ auto: z.boolean(), months: z.number().int().min(0).max(120) }).strict(),
+    drafts: z.object({ unreadDays: z.number().int().min(1).max(30), maxAgeDays: z.number().int().min(1).max(30), style: z.string().max(4000) }).strict(),
     embedding: EMBEDDING,
-    llm: LLM,
     server: z.object({ port: z.number().int().min(1024).max(65535) }).strict(),
     app: z.object({ startAtLogin: z.boolean() }).strict(),
   }).strict(),

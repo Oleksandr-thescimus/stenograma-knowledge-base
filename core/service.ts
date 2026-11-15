@@ -1,3 +1,4 @@
+import { wrapLanguageModel, type LanguageModel } from 'ai';
 import { z } from 'zod';
 import { prepareAnswer, streamAnswer } from './answer/answer.ts';
 import { rewriteQuestion } from './answer/rewrite.ts';
@@ -12,16 +13,21 @@ import {
   readKeptFile, recentImages, saveRead, type AttachmentRow, type PendingFilter,
 } from './chat/attachments.ts';
 import { describeImage, imageMediaType, readDocument } from './chat/read.ts';
+import { formatDay } from './format.ts';
+import { aiCalls, aiErrors, aiUsage, deleteErrors, foldCalls, KEEP_CALLS_MS, recordCall, type AiCall } from './usage.ts';
+import { headroomOf, rateLimitOf, type RateLimit } from './ratelimit.ts';
 import { findRooms, getConversation, getRoom, indexRead, listRooms, roomLabel, roomStats, topReacted } from './chat/store.ts';
 import { createSyncRunner, type SyncRunner } from './connectors/runner.ts';
 import { getKbId, openDb, type Db } from './db.ts';
 import { embeddingModelId, isLocalEmbedding, type EmbeddingProvider } from './embed/provider.ts';
 import { embedPending, keepJobsOf, pendingBySource, pendingEmbeddings, queueModel } from './embed/store.ts';
-import { createConfiguredEmbeddingProvider, createLanguageModel, isLocalLlm, llmKeyName } from './llm.ts';
+import {
+  createConfiguredEmbeddingProvider, createLanguageModel, isLocalLlm, isTimedOut, llmKeyName, MODEL_CALL_TIMEOUT_MS,
+} from './llm.ts';
 import { acquireLock } from './lock.ts';
 import { dataDir, dbPath, ensureDataDir, lockPath } from './paths.ts';
 import type {
-  AskPart, AttachmentSettings, ChatTurn, CitedSource, CoreEvent, CoreMethods, CoreStatus, EmbeddingSettings, KeyProvider,
+  AiCallResult, AiServer, AiStatus, AiTask, AskPart, BackgroundTask, LaneActivity, TaskServer, TaskWait, WorkNow, ChatTurn, CitedSource, CoreEvent, CoreMethods, CoreStatus, DraftView, EmbeddingSettings, KeyProvider,
   LlmSettings, ModelChoice, RewriteFilter, RocketChatAccess, SearchFilters, ServerStatus, Settings, SummaryPart, SummaryStatus, SyncLimits,
 } from './protocol.ts';
 import { createRocketChatApi, FileTooLargeError, normalizeServerUrl } from './rocketchat/api.ts';
@@ -32,15 +38,26 @@ import {
   writeConfig,
 } from './rocketchat/sync.ts';
 import { hitsOf, search, type SearchHit } from './search.ts';
+import { detectDrafts, latestFromOthers } from './drafts/detect.ts';
+import {
+  draftCounts, getDraft, listOpenDrafts, nextWaitingDraft, requestDraft, requeueWriting, updateDraft, waitingAhead, type DraftRow,
+} from './drafts/store.ts';
+import { corrections, countReplies, describeStyle, draftOutcomes, formatStyle, replyExamples, styleSample } from './drafts/style.ts';
+import { askedText, conversationLabel, conversationOf, prepareDraft, toDraftMessages, writeDraft } from './drafts/write.ts';
 import { deleteSecret, getSecret, setSecret } from './secrets.ts';
 import { buildServer, stenogramaOpenUrl } from './server.ts';
-import { DEFAULT_SETTINGS, loadSettings, saveSettings, type StoredSettings } from './settings.ts';
+import { loadSettings, saveSettings, type StoredSettings } from './settings.ts';
+import {
+  answersLlm, CLOUD_NAMES, createReachability, DOCUMENTS_LANE, imageModel, laneOf, localTextLlm, normalizeUrl, sameUrl, serverId,
+  serverTakes, textModel, textModels, whereLabel,
+} from './servers.ts';
+import type { ModelRef } from './servers.ts';
 import { listSources, removeSource, setCloudAllowed } from './sources.ts';
 import { meetingDocumentId, reindexMeeting, reindexMeetings } from './stenograma/ingest.ts';
 import { deleteSeries, findSeries, listSeries, saveSeries, seriesSources, seriesSuggestions } from './stenograma/series.ts';
 import { getIndexedVersion, getMeeting, meetingHeader, meetingLines, sourceMeetings } from './stenograma/meeting.ts';
 import {
-  averageSummaryMs, lastSummaryModel, meetingsToSummarize, saveSummary, summaryCounts, textHash,
+  averageSummaryMs, meetingsToSummarize, saveSummary, summaryCounts, textHash,
 } from './summaries.ts';
 
 // The core as the app runs it, in a utilityProcess (docs/PLAN.md, M3): it holds the lock, the database, the API for
@@ -55,8 +72,10 @@ export interface ServiceOptions {
   createLanguageModel?: typeof createLanguageModel;
   // After a failed embedding run, the queue is tried again (Ollama not running yet)
   retryEmbeddingMs?: number;
-  // Tests replace the network (Rocket.Chat) and the keyring
+  // Tests replace the network (Rocket.Chat) and the keyring; a replaced network has no realtime API but a WebSocket
+  // given with it
   fetch?: typeof fetch;
+  webSocket?: typeof WebSocket;
   secrets?: SecretStore;
 }
 
@@ -70,18 +89,21 @@ const KEYRING: SecretStore = { get: getSecret, set: setSecret, delete: deleteSec
 
 // The renderer is untrusted (CLAUDE.md), and the main process checks what it passes; this checks again what's written
 const EMBEDDING = z.object({ provider: z.enum(['ollama', 'gemini']), model: z.string().trim().min(1), ollamaUrl: z.url() });
+const AI_SERVER = z.object({
+  name: z.string().trim().min(1),
+  kind: z.enum(['ollama', 'groq', 'gemini', 'anthropic']),
+  url: z.union([z.url(), z.literal('')]),
+  text: z.string().trim(),
+  images: z.string().trim(),
+  queue: z.boolean(),
+}).refine((server) => server.kind !== 'ollama' || server.url, { message: 'An Ollama server needs its address' });
 const SETTINGS = z.object({
+  // Groq and Gemini once each, and no address twice
+  servers: z.array(AI_SERVER).min(1).refine((servers) => new Set(servers.map(serverId)).size === servers.length, { message: 'A server is there twice' }),
   summaries: z.object({ auto: z.boolean(), months: z.number().int().min(0).max(120) }),
-  attachments: z.object({
-    describeImages: z.boolean(),
-    provider: z.enum(['ollama', 'gemini']),
-    model: z.string().trim().min(1),
-    ollamaUrl: z.url(),
-    readDocuments: z.boolean(),
-    months: z.number().int().min(0).max(120),
-  }),
+  drafts: z.object({ unreadDays: z.number().int().min(1).max(30), maxAgeDays: z.number().int().min(1).max(30), style: z.string().max(4000) }),
+  attachments: z.object({ describeImages: z.boolean(), readDocuments: z.boolean(), months: z.number().int().min(0).max(120) }),
   embedding: EMBEDDING,
-  llm: z.object({ provider: z.enum(['groq', 'gemini', 'ollama']), model: z.string().trim().min(1), ollamaUrl: z.url() }),
   server: z.object({ port: z.number().int().min(1024).max(65535) }),
   app: z.object({ startAtLogin: z.boolean() }),
 });
@@ -110,19 +132,49 @@ const toCited = ({ n, hit }: { n: number, hit: SearchHit }): CitedSource => ({
   text: hit.text,
 });
 
-const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
+// An error as the user reads it: the last try's after the AI SDK's retries, with what the server said (Ollama's and
+// RKLLama's {"error": ...}) instead of only its HTTP status
+const messageOf = (error: unknown): string => {
+  if (isTimedOut(error)) {
+    return `The model didn't answer in ${MODEL_CALL_TIMEOUT_MS / 60_000} minutes`;
+  }
+
+  const last = (error as { lastError?: unknown } | null)?.lastError;
+
+  if (last) {
+    return messageOf(last);
+  }
+
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const body = (error as { responseBody?: unknown }).responseBody;
+  let said: unknown;
+
+  try {
+    said = typeof body === 'string' ? (JSON.parse(body) as { error?: unknown }).error : undefined;
+  } catch {
+    said = undefined;
+  }
+
+  return typeof said === 'string' && said ? `${error.message}: ${said.slice(0, 300)}` : error.message;
+};
+
+// A model chosen to read images that can't: a setting to change, not an image that failed
+class NoVisionError extends Error {}
 
 // F8: a meeting whose source doesn't allow cloud AI is summarized by Ollama on this computer with its default model,
 // when a cloud LLM is chosen; as drafts will be (F9)
-const summaryLlm = (settings: LlmSettings, cloudAllowed: boolean): LlmSettings => {
-  if (cloudAllowed || isLocalLlm(settings)) {
-    return settings;
+const summaryLlm = (llm: LlmSettings, cloudAllowed: boolean, settings: Pick<StoredSettings, 'servers'>): LlmSettings => {
+  if (cloudAllowed || isLocalLlm(llm)) {
+    return llm;
   }
 
-  const local: LlmSettings = { provider: 'ollama', model: DEFAULT_SETTINGS.llm.model, ollamaUrl: settings.ollamaUrl };
+  const local = localTextLlm(settings);
 
   if (!isLocalLlm(local)) {
-    throw new Error('This meeting may not go to cloud AI, and Ollama isn\'t set up on this computer');
+    throw new Error('This source may not go to cloud AI, and Ollama isn\'t set up on this computer');
   }
 
   return local;
@@ -132,6 +184,10 @@ const summaryLlm = (settings: LlmSettings, cloudAllowed: boolean): LlmSettings =
 const MAX_READ_ATTEMPTS = 3;
 // While an answer or a summary runs, the files wait this long: they use the same model
 const READ_YIELD_MS = 30_000;
+// How often the AI servers are asked whether they answer
+const SERVERS_CHECK_MS = 30_000;
+// A vision model that doesn't read images is asked again after this long, if the settings haven't changed
+const NO_VISION_RETRY_MS = 10 * 60_000;
 
 // A pause of reading images, while it lasts
 const activePause = (settings: StoredSettings) => (settings.backgroundPaused && (settings.backgroundPaused.until === null || settings.backgroundPaused.until > Date.now())
@@ -161,33 +217,284 @@ const pendingFilter = (settings: StoredSettings): PendingFilter => {
   };
 };
 
+// The provider's model as the AI SDK's middleware sees it, taken from the SDK itself
+type LanguageModelV3 = Parameters<typeof wrapLanguageModel>[0]['model'];
+type LanguageModelV3Usage = Awaited<ReturnType<LanguageModelV3['doGenerate']>>['usage'];
+type LanguageModelV3StreamPart = Awaited<ReturnType<LanguageModelV3['doStream']>>['stream'] extends ReadableStream<infer Part> ? Part : never;
+
 // The model or the network isn't there: nothing is wrong with the file, which waits
-const isUnreachable = (error: unknown) => /ECONNREFUSED|fetch failed|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|didn't answer|Cannot connect/i
+const isUnreachable = (error: unknown) => !isTimedOut(error) && /ECONNREFUSED|fetch failed|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|didn't answer|Cannot connect/i
   .test(`${messageOf(error)} ${messageOf((error as { cause?: unknown } | null)?.cause ?? '')}`);
-
-// F8, as summaries: an image of a chat that may not go to cloud AI is read by Ollama's default vision model
-const visionLlm = (settings: Pick<AttachmentSettings, 'provider' | 'model' | 'ollamaUrl'>, cloudAllowed: boolean): LlmSettings => {
-  const chosen: LlmSettings = { provider: settings.provider, model: settings.model, ollamaUrl: settings.ollamaUrl };
-
-  if (cloudAllowed || isLocalLlm(chosen)) {
-    return chosen;
-  }
-
-  const local: LlmSettings = { provider: 'ollama', model: DEFAULT_SETTINGS.attachments.model, ollamaUrl: settings.ollamaUrl };
-
-  if (!isLocalLlm(local)) {
-    throw new Error('This chat may not go to cloud AI, and Ollama isn\'t set up on this computer');
-  }
-
-  return local;
-};
 
 export const createKbService = (options: ServiceOptions) => {
   const { onEvent, log = () => undefined, retryEmbeddingMs = 60_000, secrets = KEYRING } = options;
-  const makeEmbedder = options.createEmbeddingProvider ?? createConfiguredEmbeddingProvider;
-  const makeModel = options.createLanguageModel ?? createLanguageModel;
+  const createEmbedder = options.createEmbeddingProvider ?? createConfiguredEmbeddingProvider;
+  const createModel = options.createLanguageModel ?? createLanguageModel;
 
   let db: Db | null = null;
+  // When the old AI calls were last folded into days (core/usage.ts): at the start, then daily
+  let foldedAt = 0;
+
+  // Every model call kept for the AI's statistics (core/usage.ts): its task, model, server, time, tokens and how it
+  // ended, never its text. A failure to keep it never fails the call
+  const record = (call: Omit<AiCall, 'ms'>) => {
+    try {
+      if (db?.open) {
+        recordCall(db, { ...call, ms: Date.now() - call.startedAt });
+      }
+    } catch (error) {
+      log(`keeping an AI call failed: ${messageOf(error)}`);
+    }
+  };
+  const callError = (error: unknown): AiCall['error'] => {
+    if ((error as Error | null)?.name === 'AbortError' || /aborted/i.test(messageOf(error))) {
+      return 'aborted';
+    }
+
+    if (isTimedOut(error)) {
+      return 'timeout';
+    }
+
+    return isUnreachable(error) ? 'unreachable' : 'failed';
+  };
+  const tokensOf = (usage: LanguageModelV3Usage | null | undefined) => ({
+    inputTokens: usage?.inputTokens.total ?? null, outputTokens: usage?.outputTokens.total ?? null,
+  });
+
+  // A server as the statistics name it
+  const usageServerName = (provider: string, server: string) => (provider === 'ollama'
+    ? whereLabel(loadSettings().servers, { provider: 'ollama', ollamaUrl: server })
+    : whereLabel([], { provider: provider as LlmSettings['provider'], ollamaUrl: '' }));
+
+  // What a kept call worked on, by its ids, for the list of errors: null when it's gone
+  const itemName = (item: string) => {
+    const current = openedDb();
+    const [kind, first, ...rest] = item.split(':');
+    const sourceId = Number(first);
+
+    if (kind === 'meeting') {
+      const meeting = getMeeting(current, sourceId, rest.join(':'));
+
+      return meeting ? `${meeting.title} (${formatDay(meeting.createdAt)})` : null;
+    }
+
+    if (kind === 'draft') {
+      const draft = getDraft(current, sourceId);
+
+      return draft ? `a reply in ${conversationLabel(current, draft)}` : null;
+    }
+
+    if (kind === 'file') {
+      const file = getAttachment(current, sourceId, rest.join(':'));
+      const room = file && getRoom(current, file.sourceId, file.roomId);
+
+      return file ? `${file.name}${room ? ` in ${roomLabel(room)}` : ''}` : null;
+    }
+
+    if (kind === 'turn') {
+      const turn = current.prepare('select question from chat_turns where id = ?').get(sourceId) as { question: string } | undefined;
+
+      return turn ? turn.question.replace(/\s+/g, ' ').slice(0, 120) : null;
+    }
+
+    return null;
+  };
+
+  // What a kept call made, as it's kept now: a meeting's summary, a draft, an image's reading, an answer
+  const itemResult = (item: string): AiCallResult | null => {
+    const current = openedDb();
+    const [kind, first, ...rest] = item.split(':');
+    const id = Number(first);
+
+    if (kind === 'meeting') {
+      const sessionId = rest.join(':');
+      const meeting = getMeeting(current, id, sessionId);
+      const summary = current.prepare(`
+        select s.text, s.model from summaries s join documents d on d.id = s.document_id
+        where d.kind = 'meeting' and d.source_id = ? and d.thread_id = ?
+      `).get(id, sessionId) as { text: string, model: string } | undefined;
+
+      if (!meeting) {
+        return null;
+      }
+
+      if (!summary) {
+        const document = current.prepare('select id from documents where kind = \'meeting\' and source_id = ? and thread_id = ?').get(id, sessionId) as
+          { id: string } | undefined;
+
+        if (document && claims.meetings.has(document.id)) {
+          return { kind: 'none', reason: 'working' };
+        }
+
+        return { kind: 'none', reason: document && unsummarized.has(document.id) ? 'failed' : 'waiting' };
+      }
+
+      return { kind: 'summary', ...summary, sourceId: id, sessionId, title: meeting.title, createdAt: meeting.createdAt };
+    }
+
+    if (kind === 'draft') {
+      const draft = getDraft(current, id);
+
+      if (draft && ['waiting', 'writing'].includes(draft.state)) {
+        return { kind: 'none', reason: draft.state === 'writing' ? 'working' : 'waiting' };
+      }
+
+      return draft ? { kind: 'draft', text: draft.text, state: draft.state, conversation: conversationLabel(current, draft) } : null;
+    }
+
+    if (kind === 'file') {
+      const file = getAttachment(current, id, rest.join(':'));
+
+      if (file?.state === 'pending') {
+        return { kind: 'none', reason: claims.files.has(`${file.sourceId}:${file.fileId}`) ? 'working' : 'waiting' };
+      }
+
+      if (file?.state === 'failed') {
+        return { kind: 'none', reason: 'failed' };
+      }
+
+      return file ? { kind: 'image', description: file.description, text: file.text, name: file.name } : null;
+    }
+
+    if (kind === 'turn') {
+      const turn = current.prepare('select chat_id as chatId, question, answer from chat_turns where id = ?').get(id) as
+        { chatId: number, question: string, answer: string } | undefined;
+
+      return turn ? { kind: 'answer', question: turn.question, text: turn.answer, chatId: turn.chatId } : null;
+    }
+
+    return null;
+  };
+
+  // A cloud provider's answer saying it's near its limit: its background lane waits until it's back
+  const noteHeadroom = (server: string, headers: Record<string, string | undefined> | undefined) => {
+    const ahead = headroomOf(headers);
+
+    if (ahead && !normalizeUrl(server).startsWith('http')) {
+      limited.set(server, ahead);
+      log(`${server} is near its rate limit until ${new Date(ahead.until).toISOString()}`);
+    }
+  };
+
+  // A model whose calls, each try of them, are kept
+  const makeModel = (llm: LlmSettings, task: AiTask, background = false, item: string | null = null): LanguageModel => {
+    const model = createModel(llm);
+
+    if (typeof model === 'string') {
+      return model;
+    }
+
+    const call = { task, provider: llm.provider, model: llm.model, server: llm.provider === 'ollama' ? normalizeUrl(llm.ollamaUrl) : llm.provider, background, item };
+
+    return wrapLanguageModel({
+      model: model as LanguageModelV3,
+      middleware: {
+        specificationVersion: 'v3',
+        wrapGenerate: async ({ doGenerate }) => {
+          const startedAt = Date.now();
+
+          try {
+            const result = await doGenerate();
+            record({ ...call, startedAt, ...tokensOf(result.usage), error: null });
+            noteHeadroom(call.server, result.response?.headers);
+
+            return result;
+          } catch (error) {
+            record({ ...call, startedAt, ...tokensOf(null), error: callError(error), errorMessage: messageOf(error) });
+            throw error;
+          }
+        },
+        wrapStream: async ({ doStream }) => {
+          const startedAt = Date.now();
+          let result: Awaited<ReturnType<typeof doStream>>;
+
+          try {
+            result = await doStream();
+            noteHeadroom(call.server, result.response?.headers);
+          } catch (error) {
+            record({ ...call, startedAt, ...tokensOf(null), error: callError(error), errorMessage: messageOf(error) });
+            throw error;
+          }
+
+          let usage: LanguageModelV3Usage | null = null;
+          let failed: unknown = null;
+          let kept = false;
+          const keep = (error: unknown) => {
+            if (!kept) {
+              kept = true;
+              record({ ...call, startedAt, ...tokensOf(usage), error: error ? callError(error) : null, errorMessage: error ? messageOf(error) : null });
+            }
+          };
+          const reader = result.stream.getReader();
+
+          return {
+            ...result,
+            stream: new ReadableStream<LanguageModelV3StreamPart>({
+              pull: async (controller) => {
+                try {
+                  const { done, value } = await reader.read();
+
+                  if (done) {
+                    keep(failed);
+                    controller.close();
+
+                    return;
+                  }
+
+                  if (value.type === 'error') {
+                    failed = value.error;
+                  }
+
+                  // Kept at its end: the SDK may not read on after it
+                  if (value.type === 'finish') {
+                    ({ usage } = value);
+                    keep(failed);
+                  }
+
+                  controller.enqueue(value);
+                } catch (error) {
+                  keep(error);
+                  controller.error(error);
+                }
+              },
+              cancel: (reason) => {
+                keep(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+
+                return reader.cancel(reason);
+              },
+            }),
+          };
+        },
+      },
+    });
+  };
+
+  // An embedding provider whose calls are kept: the chunks embedded, or a search's question
+  const makeEmbedder = (settings: EmbeddingSettings): EmbeddingProvider => {
+    const provider = createEmbedder(settings);
+    const server = settings.provider === 'ollama' ? normalizeUrl(settings.ollamaUrl) : settings.provider;
+
+    return {
+      ...provider,
+      embed: async (values, kind, abortSignal) => {
+        const startedAt = Date.now();
+        const call = {
+          task: kind === 'query' ? 'search' as const : 'embedding' as const, provider: settings.provider, model: settings.model, server,
+          items: values.length, background: kind !== 'query', startedAt, inputTokens: null, outputTokens: null,
+        };
+
+        try {
+          const vectors = await provider.embed(values, kind, abortSignal);
+          record({ ...call, error: null });
+
+          return vectors;
+        } catch (error) {
+          record({ ...call, error: callError(error), errorMessage: messageOf(error) });
+          throw error;
+        }
+      },
+    };
+  };
   let releaseLock: (() => void) | null = null;
   let server: ReturnType<typeof buildServer> | null = null;
   let runner: SyncRunner | null = null;
@@ -250,43 +557,102 @@ export const createKbService = (options: ServiceOptions) => {
   let embedError: string | null = null;
   let rebuildTotal = 0;
 
-  const summaryStatus = (current: Db, settings: StoredSettings, filesPending: number): SummaryStatus => {
+  // The work a lane does now
+  const workOn = (key: string): LaneActivity['now'] => {
+    const run = runs.get(key);
+
+    return run ? { task: run.task, work: run.work } : null;
+  };
+  const runsOf = (task: BackgroundTask) => [...runs.values()].filter((run) => run.task === task);
+
+  // Why a server whose queue takes a task's work doesn't do it now (TaskWait): null when nothing is in the way
+  const laneWait = (settings: StoredSettings, server: AiServer, task: BackgroundTask): TaskWait | null => {
+    const pause = activePause(settings);
+
+    if (pause) {
+      return { reason: 'paused', server: server.name, retryAt: pause.until };
+    }
+
+    const key = serverId(server);
+    const lane = lanes.get(key);
+    const retrying = lane?.timer ? lane.retry : null;
+    const other = runs.get(key)?.task;
+
+    if (retrying?.reason === 'unreachable') {
+      return { reason: 'unreachable', server: server.name, retryAt: retrying.at };
+    }
+
+    const limit = limitOn(key);
+
+    if (limit) {
+      return { reason: 'limited', server: server.name, retryAt: limit.until };
+    }
+
+    if (laneBusy(key) || retrying?.reason === 'answer') {
+      return { reason: 'answer', server: server.name, retryAt: null };
+    }
+
+    if (task === 'images' && Date.now() < (noVisionUntil.get(key) ?? 0)) {
+      return { reason: 'noVision', server: server.name, retryAt: noVisionUntil.get(key)! };
+    }
+
+    return other && other !== task ? { reason: other, server: server.name, retryAt: null } : null;
+  };
+
+  const takersOf = (settings: StoredSettings, task: BackgroundTask) => queueServers(settings).filter((server) => serverTakes(server).includes(task));
+
+  // Why a task's work waits while some is to do, on the servers whose queue takes it: the first one's reason, but a
+  // server with nothing in the way means none waits
+  const taskWait = (settings: StoredSettings, task: BackgroundTask, waits: boolean): TaskWait | null => {
+    if (!waits) {
+      return null;
+    }
+
+    const takers = takersOf(settings, task);
+
+    if (!takers.length) {
+      const pause = activePause(settings);
+
+      return pause ? { reason: 'paused', server: '', retryAt: pause.until } : { reason: 'noServer', server: '', retryAt: null };
+    }
+
+    const reasons = takers.map((server) => laneWait(settings, server, task));
+
+    return reasons.every(Boolean) ? reasons[0] : null;
+  };
+
+  // Each server whose queue takes a task's work: the one it does now, or why not while some waits, and its model's speed
+  const taskServers = (current: Db, settings: StoredSettings, task: BackgroundTask, waits: boolean): TaskServer[] => takersOf(settings, task)
+    .map((server) => {
+      const key = serverId(server);
+      const run = runs.get(key);
+      const llm = task === 'images' ? imageModel(server) : textModel(server);
+      const label = llm ? `${llm.provider} ${llm.model}` : '';
+      const work = run?.task === task ? run.work : null;
+
+      return {
+        name: server.name,
+        work,
+        wait: work || !waits ? null : laneWait(settings, server, task),
+        averageMs: task === 'summaries' ? averageSummaryMs(current, label) : averageTime(task, label),
+        tokensPerSecond: task === 'summaries' ? summaryTokensPerSecond.get(label) ?? null : null,
+      };
+    });
+
+  const summaryStatus = (current: Db, settings: StoredSettings): SummaryStatus => {
     const counts = summaryCounts(current, monthsBack(settings.summaries.months));
     const pending = settings.summaries.auto ? counts.pending ?? 0 : 0;
-    const model = summaryRun?.llm ?? lastSummaryModel(current);
-    const retrying = attachmentRetry ? backgroundRetry : null;
-    const waitingFor = (): SummaryStatus['waitingFor'] => {
-      if (summarizing || pending <= unsummarized.size) {
-        return null;
-      }
-
-      if (activePause(settings)) {
-        return 'paused';
-      }
-
-      if (asks.size || summaries.size || retrying?.reason === 'answer') {
-        return 'answer';
-      }
-
-      if (retrying?.reason === 'unreachable') {
-        return 'unreachable';
-      }
-
-      return attachmentRun || filesPending > 0 ? 'files' : null;
-    };
-    const waiting = waitingFor();
+    const making = runsOf('summaries').length;
+    const waits = pending > unsummarized.size + making;
 
     return {
       pending,
       done: counts.done ?? 0,
-      running: summarizing,
-      current: summaryRun,
-      averageMs: model ? averageSummaryMs(current, model) : null,
-      tokensPerSecond: summaryTokensPerSecond,
+      running: making > 0,
+      servers: taskServers(current, settings, 'summaries', waits),
       skipped: unsummarized.size,
       error: summaryError,
-      waitingFor: waiting,
-      retryAt: waiting === 'unreachable' || waiting === 'answer' ? retrying?.at ?? null : null,
+      waiting: taskWait(settings, 'summaries', waits && !making),
     };
   };
 
@@ -297,15 +663,25 @@ export const createKbService = (options: ServiceOptions) => {
       id: embeddingModelId(embedding), local: isLocalEmbedding(embedding),
     });
     const rebuildPending = settings.embeddingRebuild ? pendingOf(settings.embeddingRebuild) : 0;
+    const filter = pendingFilter(settings);
+    const imagesPending = filter.kinds.includes('image') ? countAttachments(current, { ...filter, kinds: ['image'] }).pending : 0;
     const attachments = {
-      ...countAttachments(current, { ...pendingFilter(settings), kinds: ['image', 'document'] }),
-      running: Boolean(attachmentRun) && !summarizing,
-      error: attachmentError,
+      ...countAttachments(current, { ...filter, kinds: ['image', 'document'] }),
+      running: filesReading > 0,
+      error: attachmentError ?? noVisionError,
       paused: activePause(settings),
+      images: {
+        pending: imagesPending,
+        servers: taskServers(current, settings, 'images', imagesPending > runsOf('images').length),
+        waiting: taskWait(settings, 'images', imagesPending > runsOf('images').length && !runsOf('images').length),
+      },
     };
+    const summaries = summaryStatus(current, settings);
+    const draftsCounted = draftCounts(current);
 
     return {
       kbId: getKbId(current),
+      ai: aiStatus(settings),
       dataDir: dataDir(),
       sources: (() => {
         const waiting = pendingBySource(current, { id: embeddingModelId(settings.embedding), local: isLocalEmbedding(settings.embedding) });
@@ -327,12 +703,20 @@ export const createKbService = (options: ServiceOptions) => {
       },
       server: serverStatus,
       attachments,
-      summaries: summaryStatus(current, settings, attachments.pending),
+      summaries,
+      drafts: {
+        ...draftsCounted,
+        writing: runsOf('drafts').length > 0,
+        error: draftError,
+        servers: taskServers(current, settings, 'drafts', draftsCounted.waiting > 0),
+        wait: taskWait(settings, 'drafts', draftsCounted.waiting > 0 && !runsOf('drafts').length),
+      },
     };
   };
 
   // At most a few times a second while a queue is worked through
   let statusTimer: ReturnType<typeof setTimeout> | null = null;
+  let serversTimer: ReturnType<typeof setInterval> | null = null;
   const emitStatus = () => {
     if (statusTimer || stopping) {
       return;
@@ -443,21 +827,62 @@ export const createKbService = (options: ServiceOptions) => {
     emitStatus();
   };
 
-  // Chat files: one read at a time, the newest first, after answers and summaries. A model or server that isn't there
-  // stops the run, which is tried again after a while
-  let attachmentRun: Promise<void> | null = null;
-  let attachmentAgain = false;
-  let attachmentRetry: ReturnType<typeof setTimeout> | null = null;
+  // The background work, a queue per lane (servers.ts): a server's or a cloud provider's, each running the work whose
+  // model is there, one at a time: reply drafts, then chat files (the newest first), then meetings' summaries. A lane
+  // gives way to what the user asked for on it; a server that isn't reached stops its lane, tried again after a while
+  // or when it answers again
+  interface Lane {
+    run: Promise<void> | null;
+    again: boolean;
+    timer: ReturnType<typeof setTimeout> | null;
+    // Why it waits for its timer: an answer going on, a model not reached, a cloud provider's rate limit
+    retry: { at: number, reason: 'answer' | 'unreachable' | 'limited' } | null;
+  }
+  const lanes = new Map<string, Lane>();
+  // A cloud provider's rate limit reached, or about to be (core/ratelimit.ts): its lane waits until then
+  const limited = new Map<string, RateLimit>();
+  const limitOn = (key: string) => {
+    const limit = limited.get(key);
+
+    return limit && limit.until > Date.now() ? limit : null;
+  };
+  // The lanes of what the user asked for (answers, summaries), by its id
+  const askLanes = new Map<string, string>();
+  const laneBusy = (key: string) => [...askLanes.values()].includes(key);
+  const reach = createReachability((...args) => (options.fetch ?? fetch)(...args));
   let attachmentError: string | null = null;
-  // Aborts the image being read, or the meeting being summarized, when the background work is paused
-  let imageRead: AbortController | null = null;
-  let summarizing = false;
-  // The background summary being made, its speed and the last one's error, for the status
-  let summaryRun: SummaryStatus['current'] = null;
-  let summaryTokensPerSecond: number | null = null;
+  // A server whose image model doesn't read images: its images wait until then, or until the settings change, and say why
+  const noVisionUntil = new Map<string, number>();
+  let noVisionError: string | null = null;
+  // Output tokens a second of each model's last background summary
+  const summaryTokensPerSecond = new Map<string, number>();
   let summaryError: string | null = null;
-  // Why the background work waits for its timer: an answer going on, or a model not reached
-  let backgroundRetry: { at: number, reason: 'answer' | 'unreachable' } | null = null;
+  let draftError: string | null = null;
+  // What each lane does now, with the abort of it (a pause, a draft dismissed); a summary with its progress
+  interface LaneRun {
+    task: BackgroundTask;
+    work: WorkNow;
+    controller: AbortController;
+    draftId?: number;
+  }
+  const runs = new Map<string, LaneRun>();
+  // The lanes whose queue was turned off while at work: what they stopped waits again, nothing wrong with it
+  const released = new Set<string>();
+  // What a lane took, so another doesn't take it too
+  const claims = { drafts: new Set<number>(), files: new Set<string>(), meetings: new Set<string>() };
+  // Chat files being read now
+  let filesReading = 0;
+  // The times of the last images read and drafts written by a model ("ollama qwen3.5:4b"), for their average
+  const timings = new Map<string, number[]>();
+  const timed = (task: BackgroundTask, model: string, ms: number) => {
+    const key = `${task} ${model}`;
+    timings.set(key, [...(timings.get(key) ?? []), ms].slice(-10));
+  };
+  const averageTime = (task: BackgroundTask, model: string) => {
+    const times = timings.get(`${task} ${model}`);
+
+    return times?.length ? Math.round(times.reduce((sum, ms) => sum + ms, 0) / times.length) : null;
+  };
   // Meetings whose summary failed in this run of the core: tried again after a restart
   const unsummarized = new Set<string>();
   let pauseTimer: ReturnType<typeof setTimeout> | null = null;
@@ -494,11 +919,12 @@ export const createKbService = (options: ServiceOptions) => {
     return { bytes, fetched: true };
   };
 
-  const readFile = async (file: AttachmentRow) => {
+  // A chat file: an image by the image model of the lane reading it, a document without a model
+  const readFile = async (file: AttachmentRow, lane: { key: string, llm: LlmSettings | null }) => {
     const current = openedDb();
-    const settings = loadSettings().attachments;
 
     let fetched = false;
+    filesReading += 1;
 
     try {
       const got = await fetchFile(file);
@@ -506,12 +932,32 @@ export const createKbService = (options: ServiceOptions) => {
       ({ fetched } = got);
 
       if (file.kind === 'image') {
-        const llm = visionLlm(settings, sourceCloudAllowed(file.sourceId));
-        imageRead = new AbortController();
-        const read = await describeImage(makeModel(llm), llm, bytes, imageMediaType(file), AbortSignal.any([stopController.signal, imageRead.signal]))
-          .finally(() => {
-            imageRead = null;
-          });
+        const { llm } = lane;
+
+        if (!llm) {
+          throw new Error('No image model on this server');
+        }
+
+        // F8: a cloud server's queue takes only the chats that may go there
+        if (!isLocalLlm(llm) && !sourceCloudAllowed(file.sourceId)) {
+          throw new Error('This chat may not go to cloud AI');
+        }
+
+        await checkVision(llm);
+        const controller = new AbortController();
+        const room = getRoom(current, file.sourceId, file.roomId);
+        const startedAt = Date.now();
+        runs.set(lane.key, {
+          task: 'images',
+          controller,
+          work: {
+            title: file.name, detail: `${room ? `${roomLabel(room)}, ` : ''}${formatDay(file.ts)}`, startedAt, model: llm.model, server: whereLabel(loadSettings().servers, llm),
+          },
+        });
+        emitStatus();
+        const read = await describeImage(makeModel(llm, 'image', true, `file:${file.sourceId}:${file.fileId}`), llm, bytes, imageMediaType(file), AbortSignal.any([stopController.signal, controller.signal]))
+          .finally(() => runs.delete(lane.key));
+        timed('images', `${llm.provider} ${llm.model}`, Date.now() - startedAt);
         saveRead(current, file.sourceId, file.fileId, { state: 'done', ...read, model: `${llm.provider} ${llm.model}` });
       } else {
         const text = await readDocument(bytes, file);
@@ -523,6 +969,8 @@ export const createKbService = (options: ServiceOptions) => {
       }
 
       saveRead(current, file.sourceId, file.fileId, { state: 'skipped', error: error.message });
+    } finally {
+      filesReading -= 1;
     }
 
     const embedModel = embeddingModelId(loadSettings().embedding);
@@ -556,7 +1004,7 @@ export const createKbService = (options: ServiceOptions) => {
   };
 
   // A short summary of a series's meeting, made in the background as by "Summarize", and indexed with it
-  const summarizeMeeting = async (meeting: { id: string, sourceId: number, sessionId: string }) => {
+  const summarizeMeeting = async (meeting: { id: string, sourceId: number, sessionId: string }, lane: { key: string, llm: LlmSettings }) => {
     const current = openedDb();
     const view = getMeeting(current, meeting.sourceId, meeting.sessionId);
     const lines = view ? meetingLines(view) : [];
@@ -567,126 +1015,371 @@ export const createKbService = (options: ServiceOptions) => {
       return;
     }
 
-    const llm = summaryLlm(loadSettings().llm, sourceCloudAllowed(meeting.sourceId));
+    const llm = summaryLlm(lane.llm, sourceCloudAllowed(meeting.sourceId), loadSettings());
     const label = `${llm.provider} ${llm.model}`;
     const calls = summaryCalls(meeting.sourceId, true);
-    imageRead = new AbortController();
-    summarizing = true;
+    const controller = new AbortController();
     const startedAt = Date.now();
-    summaryRun = {
-      title: view.title, createdAt: view.createdAt, startedAt, done: 0, all: 1, llm: label, local: isLocalLlm(llm),
+    const server = whereLabel(loadSettings().servers, llm);
+    const run: LaneRun = {
+      task: 'summaries',
+      controller,
+      work: { title: view.title, detail: formatDay(view.createdAt), startedAt, model: llm.model, server, step: { done: 0, all: 1 } },
     };
+    runs.set(lane.key, run);
     emitStatus();
 
     try {
-      const text = await summarizeTranscript(makeModel(llm), llm, {
+      const text = await summarizeTranscript(makeModel(llm, 'summary', true, `meeting:${meeting.sourceId}:${meeting.sessionId}`), llm, {
         header: meetingHeader(view),
         lines,
-        abortSignal: AbortSignal.any([stopController.signal, imageRead.signal]),
+        abortSignal: AbortSignal.any([stopController.signal, controller.signal]),
         onProgress: (done, all) => {
-          if (summaryRun) {
-            summaryRun = { ...summaryRun, done, all };
-            emitStatus();
-          }
+          run.work = { ...run.work, step: { done, all } };
+          emitStatus();
         },
         onText: () => undefined,
         onCall: calls.onCall,
       });
       const durationMs = Date.now() - startedAt;
       saveSummary(current, meeting.id, textHash(lines), label, text, { durationMs, calls: calls.calls() });
-      summaryTokensPerSecond = calls.tokensPerSecond() ?? summaryTokensPerSecond;
+      const speed = calls.tokensPerSecond();
+
+      if (speed !== null) {
+        summaryTokensPerSecond.set(label, speed);
+      }
+
       summaryError = null;
       reindexMeeting(current, meeting.sourceId, meeting.sessionId, embeddingModelId(loadSettings().embedding));
       log(`summarized meeting of source ${meeting.sourceId} in the background: ${lines.length} lines, ${calls.calls()} calls, ${durationMs} ms`);
       runEmbedding();
     } finally {
-      imageRead = null;
-      summarizing = false;
-      summaryRun = null;
+      runs.delete(lane.key);
     }
   };
 
-  const runBackground = () => {
+  // F9: a reply draft from the conversation and what the knowledge base has on it. F8 as summaries: a messenger that
+  // doesn't allow cloud AI gets its drafts from Ollama
+  const writeQueuedDraft = async (draft: DraftRow, lane: { key: string, llm: LlmSettings }) => {
+    const current = openedDb();
+    const settings = loadSettings();
+    const { username } = readConfig(current, draft.sourceId);
+    const messages = conversationOf(current, draft);
+
+    if (!messages.length) {
+      updateDraft(current, draft.id, { state: 'failed', error: 'The message is no longer in the knowledge base' });
+
+      return;
+    }
+
+    // Written by the server whose queue took it: when it isn't reached, the draft waits again for another one
+    const llm = summaryLlm(lane.llm, sourceCloudAllowed(draft.sourceId), settings);
+    const label = `${llm.provider} ${llm.model}`;
+    const controller = new AbortController();
+    updateDraft(current, draft.id, { state: 'writing', error: null, model: label });
+    const startedAt = Date.now();
+    runs.set(lane.key, {
+      task: 'drafts',
+      controller,
+      draftId: draft.id,
+      work: { title: conversationLabel(current, draft), detail: null, startedAt, model: llm.model, server: whereLabel(settings.servers, llm) },
+    });
+    emitStatus();
+
+    try {
+      let provider: EmbeddingProvider | null = null;
+
+      try {
+        provider = makeEmbedder(settings.embedding);
+      } catch {
+        // Found by words only
+      }
+
+      const query = askedText(messages, username) || messages.at(-1)!.text;
+      const { hits } = await search(current, query, { provider, limit: 20 });
+      const examples = replyExamples(current, draft.sourceId, username, messages.at(-1)!, messages[0].ts);
+      const fixes = corrections(current, draft.sourceId);
+      const prepared = prepareDraft(current, llm, draft, messages, username, hits, {
+        description: settings.drafts.style, examples: formatStyle(examples, fixes),
+      });
+      const text = await writeDraft(makeModel(llm, 'draft', !draft.asked, `draft:${draft.id}`), llm, prepared, AbortSignal.any([stopController.signal, controller.signal]));
+
+      // Dismissed, or answered in the messenger, meanwhile
+      if (current.open && getDraft(current, draft.id)?.state === 'writing') {
+        updateDraft(current, draft.id, { state: 'ready', text, sources: prepared.sources.map(toCited), error: null });
+      }
+
+      draftError = null;
+      timed('drafts', label, Date.now() - startedAt);
+      log(`wrote reply draft ${draft.id} of source ${draft.sourceId}: ${messages.length} messages, ${prepared.sources.length} sources, `
+        + `${examples.length} replies and ${fixes.length} corrected drafts as examples, `
+        + `${text.length} characters, ${Date.now() - startedAt} ms`);
+    } finally {
+      runs.delete(lane.key);
+    }
+  };
+
+  // The Rocket.Chat sources with the user's username there
+  const rocketChatSources = (current: Db) => listSources(current).filter((source) => source.kind === ROCKETCHAT_KIND)
+    .map((source) => ({ sourceId: source.id, username: readConfig(current, source.id).username as string }));
+
+  const draftView = (current: Db, draft: DraftRow): DraftView => {
+    const { username } = readConfig(current, draft.sourceId);
+
+    return {
+      id: draft.id,
+      sourceId: draft.sourceId,
+      conversation: conversationLabel(current, draft),
+      reason: draft.reason,
+      state: draft.state as DraftView['state'],
+      messages: toDraftMessages(conversationOf(current, draft).slice(-6), username),
+      text: draft.text,
+      sources: draft.sources,
+      llm: draft.model,
+      local: draft.model?.startsWith('ollama ') ?? false,
+      error: draft.error,
+      createdAt: draft.createdAt,
+      updatedAt: draft.updatedAt,
+      ahead: draft.state === 'waiting' ? waitingAhead(current, draft) : 0,
+      asked: draft.asked,
+    };
+  };
+
+  // After a messenger's sync: the drafts answered there close, and new messages to the user get theirs
+  const findDrafts = (sourceId: number) => {
+    const current = openedDb();
+    const source = listSources(current).find((candidate) => candidate.id === sourceId);
+
+    if (!source?.repliesEnabled || source.kind !== ROCKETCHAT_KIND) {
+      return;
+    }
+
+    const config = readConfig(current, sourceId);
+    const added = detectDrafts(current, {
+      sourceId, username: config.username, since: config.draftsSince ?? Date.now(), ...loadSettings().drafts,
+    });
+
+    if (added) {
+      log(`${added} new reply drafts for source ${sourceId}`);
+    }
+
+    emitStatus();
+    runBackground();
+  };
+
+  const laneState = (key: string) => {
+    const known = lanes.get(key);
+
+    if (known) {
+      return known;
+    }
+
+    const lane: Lane = { run: null, again: false, timer: null, retry: null };
+    lanes.set(key, lane);
+
+    return lane;
+  };
+
+  // The work of a lane as the settings have it now
+  // The servers whose queue is on and that have a model for some of the background work, a lane each
+  const queueServers = (settings: StoredSettings) => settings.servers.filter((server) => server.queue && serverTakes(server).length > 0);
+
+  const backgroundLanes = (settings: StoredSettings) => new Set([...queueServers(settings).map(serverId), DOCUMENTS_LANE]);
+
+  // A model's server not reached: its lane waits, and the status says so
+  const notReached = (key: string) => {
+    if (key !== DOCUMENTS_LANE && !Object.keys(CLOUD_NAMES).includes(key)) {
+      reach.unreachable(key);
+    }
+  };
+
+  const runLane = (key: string) => {
     if (!db || stopping) {
       return;
     }
 
-    if (attachmentRun) {
-      attachmentAgain = true;
+    const lane = laneState(key);
+
+    if (lane.run) {
+      lane.again = true;
 
       return;
     }
 
-    if (attachmentRetry) {
-      clearTimeout(attachmentRetry);
-      attachmentRetry = null;
+    if (lane.timer) {
+      clearTimeout(lane.timer);
+      lane.timer = null;
     }
 
-    backgroundRetry = null;
+    lane.retry = null;
     const current = db;
-    const retry = (ms: number, reason: 'answer' | 'unreachable' = 'unreachable') => {
-      attachmentRetry = setTimeout(runBackground, ms);
-      backgroundRetry = { at: Date.now() + ms, reason };
+    const retry = (ms: number, reason: 'answer' | 'unreachable' | 'limited' = 'unreachable') => {
+      lane.timer = setTimeout(() => runLane(key), ms);
+      lane.retry = { at: Date.now() + ms, reason };
     };
 
-    attachmentRun = (async () => {
-      // A run with nothing to read would end before attachmentRun is set, which would then never be cleared
+    lane.run = (async () => {
+      // A run with nothing to do would end before lane.run is set, which would then never be cleared
       await Promise.resolve();
       let stopped = false;
 
       do {
-        attachmentAgain = false;
+        lane.again = false;
 
         while (!stopping && !stopped) {
-          // Answers and summaries first: they use the same model
-          if (asks.size || summaries.size) {
+          // What the user asked for on this lane first: it uses the same model
+          if (laneBusy(key)) {
             retry(READ_YIELD_MS, 'answer');
             stopped = true;
             break;
           }
 
           const settings = loadSettings();
-          const file = nextPending(current, pendingFilter(settings));
+          // Its server's models: a queue turned off, or a server removed, stops its lane
+          const server = key === DOCUMENTS_LANE ? null : queueServers(settings).find((candidate) => serverId(candidate) === key);
 
-          // No file waits: a series's meeting without a summary, unless that's off or paused
-          if (!file) {
-            const [meeting] = settings.summaries.auto && !activePause(settings)
-              ? meetingsToSummarize(current, monthsBack(settings.summaries.months), unsummarized, 1)
-              : [];
+          if (key !== DOCUMENTS_LANE && !server) {
+            break;
+          }
 
-            if (!meeting) {
-              break;
-            }
+          // A cloud provider at its rate limit: the lane waits until it's back, the other servers go on
+          const limit = limitOn(key);
+
+          if (limit) {
+            retry(limit.until - Date.now(), 'limited');
+            stopped = true;
+            break;
+          }
+
+          const text = server ? textModel(server) : null;
+          const images = server ? imageModel(server) : null;
+          // F8: a cloud server takes only the work of sources that may go to cloud AI
+          const cloudOnly = Boolean(server && server.kind !== 'ollama');
+          // Reply drafts first: they're waited for. While the background work is paused, only those asked for by hand
+          const draft = text ? nextWaitingDraft(current, { manualOnly: Boolean(activePause(settings)), exclude: [...claims.drafts], cloudOnly }) : undefined;
+
+          if (draft && text) {
+            claims.drafts.add(draft.id);
 
             try {
               // eslint-disable-next-line no-await-in-loop
-              await summarizeMeeting(meeting);
-              attachmentError = null;
+              await writeQueuedDraft(draft, { key, llm: text });
             } catch (error) {
               if (stopping) {
                 break;
               }
 
-              if (!activePause(loadSettings())) {
-                summaryError = messageOf(error);
-                log(`a background summary of source ${meeting.sourceId} failed`);
+              const message = messageOf(error);
+              const dismissed = getDraft(current, draft.id)?.state !== 'writing';
 
-                if (isUnreachable(error)) {
-                  retry(retryEmbeddingMs);
-                  stopped = true;
-                } else {
-                  unsummarized.add(meeting.id);
-                }
+              const rateLimit = rateLimitOf(error);
+
+              if (released.delete(key)) {
+                updateDraft(current, draft.id, { state: 'waiting' });
+                claims.drafts.delete(draft.id);
+                runBackground();
+                stopped = true;
+                break;
               }
+
+              if (rateLimit && !dismissed) {
+                // Not the draft's fault: it waits again, for another server or this one's limit to pass
+                limited.set(key, rateLimit);
+                updateDraft(current, draft.id, { state: 'waiting' });
+                retry(rateLimit.until - Date.now(), 'limited');
+                stopped = true;
+                claims.drafts.delete(draft.id);
+                runBackground();
+              } else if (isUnreachable(error) && !dismissed) {
+                // Another server's queue takes it meanwhile
+                draftError = message;
+                updateDraft(current, draft.id, { state: 'waiting' });
+                notReached(key);
+                retry(retryEmbeddingMs);
+                stopped = true;
+                claims.drafts.delete(draft.id);
+                runBackground();
+              } else if (!dismissed) {
+                draftError = message;
+                updateDraft(current, draft.id, { state: activePause(loadSettings()) ? 'waiting' : 'failed', error: message });
+              }
+
+              log(`reply draft ${draft.id} of source ${draft.sourceId} failed`);
+            } finally {
+              claims.drafts.delete(draft.id);
             }
 
             emitStatus();
             continue;
           }
 
+          const filter = pendingFilter(settings);
+          const kinds = filter.kinds.filter((kind) => (kind === 'image' ? Boolean(images) && Date.now() >= (noVisionUntil.get(key) ?? 0) : key === DOCUMENTS_LANE));
+          const file = nextPending(current, { ...filter, kinds, exclude: [...claims.files], cloudOnly });
+
+          // No file waits: a series's meeting without a summary, unless that's off or paused
+          if (!file) {
+            const [meeting] = text && settings.summaries.auto && !activePause(settings)
+              ? meetingsToSummarize(current, monthsBack(settings.summaries.months), new Set([...unsummarized, ...claims.meetings]), 1, { cloudOnly })
+              : [];
+
+            if (!meeting || !text) {
+              break;
+            }
+
+            claims.meetings.add(meeting.id);
+
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              await summarizeMeeting(meeting, { key, llm: text });
+            } catch (error) {
+              if (stopping) {
+                break;
+              }
+
+              const rateLimit = rateLimitOf(error);
+
+              if (released.delete(key)) {
+                claims.meetings.delete(meeting.id);
+                runBackground();
+                stopped = true;
+                break;
+              }
+
+              if (rateLimit) {
+                // Not the meeting's fault: it waits, and this server until its limit passes
+                limited.set(key, rateLimit);
+                log(`${key} is at its rate limit until ${new Date(rateLimit.until).toISOString()}`);
+                retry(rateLimit.until - Date.now(), 'limited');
+                stopped = true;
+                claims.meetings.delete(meeting.id);
+                runBackground();
+              } else if (!activePause(loadSettings())) {
+                summaryError = messageOf(error);
+                log(`a background summary of source ${meeting.sourceId} failed`);
+
+                if (isUnreachable(error)) {
+                  notReached(key);
+                  retry(retryEmbeddingMs);
+                  stopped = true;
+                } else {
+                  unsummarized.add(meeting.id);
+                }
+              }
+            } finally {
+              claims.meetings.delete(meeting.id);
+            }
+
+            emitStatus();
+            continue;
+          }
+
+          const fileKey = `${file.sourceId}:${file.fileId}`;
+          claims.files.add(fileKey);
+
           try {
             // eslint-disable-next-line no-await-in-loop
-            const { fetched } = await readFile(file);
+            const { fetched } = await readFile(file, { key, llm: images });
             attachmentError = null;
 
             // A pause after a file from the server, as its source is set
@@ -715,22 +1408,150 @@ export const createKbService = (options: ServiceOptions) => {
             attachmentError = messageOf(error);
             log(`reading file ${file.fileId} of source ${file.sourceId} failed`);
 
-            if (isUnreachable(error)) {
+            // The images wait for a model that reads them, the lane's other work goes on: tried again when the settings
+            // change, or in a while
+            const rateLimit = rateLimitOf(error);
+
+            if (released.delete(key)) {
+              attachmentError = null;
+              claims.files.delete(fileKey);
+              runBackground();
+              stopped = true;
+              break;
+            }
+
+            if (rateLimit) {
+              // Not the image's fault: it waits, and this server until its limit passes
+              limited.set(key, rateLimit);
+              attachmentError = null;
+              retry(rateLimit.until - Date.now(), 'limited');
+              stopped = true;
+              claims.files.delete(fileKey);
+              runBackground();
+            } else if (error instanceof NoVisionError) {
+              noVisionUntil.set(key, Date.now() + NO_VISION_RETRY_MS);
+              noVisionError = attachmentError;
+              attachmentError = null;
+            } else if (isUnreachable(error)) {
+              notReached(key);
               retry(retryEmbeddingMs);
               stopped = true;
             } else {
               failRead(current, file.sourceId, file.fileId, attachmentError, MAX_READ_ATTEMPTS);
             }
+          } finally {
+            claims.files.delete(fileKey);
           }
 
           emitStatus();
         }
-      } while (attachmentAgain && !stopping && !stopped);
+      } while (lane.again && !stopping && !stopped);
 
-      attachmentRun = null;
+      // Its work done before the abort came: nothing left to put back
+      released.delete(key);
+      lane.run = null;
       emitStatus();
     })();
     emitStatus();
+  };
+
+  const runBackground = () => {
+    if (!db || stopping) {
+      return;
+    }
+
+    backgroundLanes(loadSettings()).forEach(runLane);
+  };
+
+  // What the user asks for goes to the next server's text model, in the settings' order, when its own server isn't
+  // reached (Settings → AI models)
+  const withFallback = async (llm: LlmSettings) => {
+    if (llm.provider !== 'ollama' || await reach.check(llm.ollamaUrl)) {
+      return { llm, fellBack: false };
+    }
+
+    for (const next of textModels(loadSettings())) {
+      // eslint-disable-next-line no-await-in-loop
+      if (laneOf(next) !== laneOf(llm) && (next.provider !== 'ollama' || await reach.check(next.ollamaUrl))) {
+        log(`${normalizeUrl(llm.ollamaUrl)} isn't reached: ${next.provider} ${next.model} instead of ${llm.model}`);
+
+        return { llm: next, fellBack: true };
+      }
+    }
+
+    return { llm, fellBack: false };
+  };
+
+  // The servers of the background work, asked every 30 seconds: one that answers again has its lane run at once
+  const watchServers = async () => {
+    if (!db || stopping) {
+      return;
+    }
+
+    // The calls of over a year ago into their day's totals, once a day for an app that runs for weeks
+    if (Date.now() - foldedAt > 24 * 60 * 60_000) {
+      foldedAt = Date.now();
+      foldCalls(db, foldedAt - KEEP_CALLS_MS);
+    }
+
+    const settings = loadSettings();
+    const urls = new Set(settings.servers.filter((server) => server.kind === 'ollama').map((server) => normalizeUrl(server.url)));
+    let changed = false;
+
+    await Promise.all([...urls].map(async (url) => {
+      const before = reach.last(url);
+      const now = await reach.check(url, true);
+
+      if (before !== now) {
+        changed = true;
+        log(`${url} ${now ? 'answers' : 'isn\'t reached'}`);
+
+        if (now) {
+          runLane(url);
+        }
+      }
+    }));
+
+    if (changed) {
+      emitStatus();
+    }
+  };
+
+  // A cloud provider answers with its key in the keyring, unless its last call didn't get through. The keyring is read
+  // at most every 10 seconds: the status is made several times a second while work goes on
+  const keyKnown = new Map<string, { at: number, set: boolean }>();
+  const cloudReachable = (provider: KeyProvider, lane: Lane | undefined) => {
+    const known = keyKnown.get(provider);
+    const set = known && Date.now() - known.at < 10_000 ? known.set : Boolean(secrets.get(llmKeyName(provider)));
+    keyKnown.set(provider, known && Date.now() - known.at < 10_000 ? known : { at: Date.now(), set });
+
+    return set && !cloudFailures.has(provider) && !(lane?.timer && lane.retry?.reason === 'unreachable');
+  };
+
+  const aiStatus = (settings: StoredSettings): AiStatus => {
+    // The chat's model: the first text model whose server isn't known to be down
+    const answers = textModels(settings).find((model) => model.provider !== 'ollama' || reach.last(model.ollamaUrl) !== false) ?? answersLlm(settings);
+
+    return {
+      lanes: settings.servers.map((server): LaneActivity => {
+        const key = serverId(server);
+        const known = lanes.get(key);
+
+        return {
+          name: server.name,
+          id: key,
+          kind: server.kind,
+          reachable: server.kind === 'ollama' ? reach.last(server.url) : cloudReachable(server.kind, known),
+          queue: server.queue,
+          takes: serverTakes(server),
+          now: workOn(key),
+          asked: laneBusy(key),
+          retryAt: known?.timer && known.retry?.reason === 'unreachable' ? known.retry.at : null,
+          limited: limitOn(key),
+        };
+      }),
+      answers: { model: answers.model, server: whereLabel(settings.servers, answers) },
+    };
   };
 
   // Ollama's models with what they can do (completion, vision, embedding...)
@@ -759,9 +1580,62 @@ export const createKbService = (options: ServiceOptions) => {
     })));
   };
 
+  // Whether an Ollama model reads images, by what its server says it can do; asked once per model and address. Known
+  // only when the server says: one that doesn't is tried
+  const visionKnown = new Map<string, boolean>();
+  const checkVision = async (llm: LlmSettings) => {
+    if (llm.provider !== 'ollama') {
+      return;
+    }
+
+    const key = `${normalizeUrl(llm.ollamaUrl)}|${llm.model}`;
+
+    if (!visionKnown.has(key)) {
+      const response = await (options.fetch ?? fetch)(`${normalizeUrl(llm.ollamaUrl)}/api/show`, {
+        method: 'POST', body: JSON.stringify({ model: llm.model }), signal: AbortSignal.timeout(10_000),
+      }).catch(() => null);
+      const capabilities = response?.ok ? ((await response.json()) as { capabilities?: string[] }).capabilities : undefined;
+
+      if (capabilities) {
+        visionKnown.set(key, capabilities.includes('vision'));
+      } else if (response?.status === 404) {
+        throw new NoVisionError(`${llm.model} isn't on ${whereLabel(loadSettings().servers, llm)}: choose another in Settings → AI models → Images`);
+      }
+    }
+
+    if (visionKnown.get(key) === false) {
+      throw new NoVisionError(`${llm.model} on ${whereLabel(loadSettings().servers, llm)} doesn't read images: choose a vision model in Settings → AI models → Images`);
+    }
+  };
+
+  const serverChoices = (server: AiServer, names: string[]) => names.map((name): ModelChoice => ({
+    provider: 'ollama', model: name, ollamaUrl: server.url, server: server.name, local: isLocalLlm({ provider: 'ollama', model: name, ollamaUrl: server.url }),
+  }));
+
+  // The settings' model first, though its server can't be reached now
+  const withConfigured = (choices: ModelChoice[], model: ModelRef, servers: AiServer[]): ModelChoice[] => {
+    const same = (choice: ModelChoice) => choice.provider === model.provider && choice.model === model.model
+      && (model.provider !== 'ollama' || sameUrl(choice.ollamaUrl ?? '', model.ollamaUrl));
+    const configured: ModelChoice[] = choices.some(same) ? [] : [{
+      provider: model.provider,
+      model: model.model,
+      local: isLocalLlm(model),
+      ...(model.provider === 'ollama' && { ollamaUrl: model.ollamaUrl, server: whereLabel(servers, model) }),
+    }];
+
+    return [...configured, ...choices];
+  };
+
+  // A server's models that answer: rerankers say they complete, but don't
+  const answersText = (model: { name: string, capabilities: string[] }) => model.capabilities.includes('completion')
+    && !model.capabilities.includes('embedding') && !/rerank/i.test(model.name);
+  const serverChatModels = async (url: string) => (await ollamaModels(url)).filter(answersText).map((model) => model.name);
+
   // Groq's and Gemini's chat models, listed by their APIs with the key in the keyring, for 10 minutes; none without one
-  const cloudLists = new Map<'groq' | 'gemini', { at: number, models: ModelChoice[] }>();
-  const cloudModels = async (provider: 'groq' | 'gemini'): Promise<ModelChoice[]> => {
+  const cloudLists = new Map<KeyProvider, { at: number, models: ModelChoice[] }>();
+  // Why a provider's models couldn't be listed, for Settings
+  const cloudFailures = new Map<KeyProvider, string>();
+  const cloudModels = async (provider: KeyProvider): Promise<ModelChoice[]> => {
     const cached = cloudLists.get(provider);
 
     if (cached && Date.now() - cached.at < 10 * 60_000) {
@@ -777,29 +1651,70 @@ export const createKbService = (options: ServiceOptions) => {
     try {
       const fetchImpl = options.fetch ?? fetch;
       const signal = AbortSignal.timeout(10_000);
+      // What the provider said when it refused: a wrong key, no access to the models list
+      const answered = async (response: Response) => {
+        if (!response.ok) {
+          const body = await response.json().catch(() => null) as { error?: { message?: string } | string } | null;
+          const said = typeof body?.error === 'string' ? body.error : body?.error?.message;
+          throw new Error(`${CLOUD_NAMES[provider]} answered ${response.status}${said ? `: ${String(said).slice(0, 200)}` : ''}`);
+        }
+
+        return response.json() as Promise<unknown>;
+      };
       let names: string[];
 
       if (provider === 'groq') {
         const response = await fetchImpl('https://api.groq.com/openai/v1/models', { headers: { Authorization: `Bearer ${key}` }, signal });
-        const { data } = await response.json() as { data: { id: string, active?: boolean }[] };
+        const { data } = await answered(response) as { data: { id: string, active?: boolean }[] };
         // Speech, moderation and the like don't answer questions
-        names = data.filter((model) => model.active !== false && !/whisper|tts|guard|playai|distil|orpheus|compound/i.test(model.id)).map((model) => model.id);
+        names = data.filter((model) => model.active !== false && !/whisper|tts|guard|playai|distil|orpheus|compound/i.test(model.id)).map((model) => model.id).sort();
+      } else if (provider === 'anthropic') {
+        // Newest first, as the API lists them
+        const response = await fetchImpl('https://api.anthropic.com/v1/models?limit=100', { headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, signal });
+        const { data } = await answered(response) as { data: { id: string }[] };
+        names = data.map((model) => model.id);
       } else {
         const response = await fetchImpl('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key }, signal });
-        const { models } = await response.json() as { models: { name: string, supportedGenerationMethods?: string[] }[] };
+        const { models } = await answered(response) as { models: { name: string, supportedGenerationMethods?: string[] }[] };
         names = models.filter((model) => model.supportedGenerationMethods?.includes('generateContent') && /^models\/gemini/.test(model.name)
-          && !/embedding|image|tts|audio|live/i.test(model.name)).map((model) => model.name.replace(/^models\//, ''));
+          && !/embedding|image|tts|audio|live/i.test(model.name)).map((model) => model.name.replace(/^models\//, '')).sort();
       }
 
-      const models = names.sort().map((model) => ({ provider, model, local: false }));
+      const models = names.map((model) => ({ provider, model, local: false }));
       cloudLists.set(provider, { at: Date.now(), models });
+      cloudFailures.delete(provider);
 
       return models;
     } catch (error) {
       log(`listing ${provider}'s models failed: ${messageOf(error)}`);
+      cloudFailures.set(provider, messageOf(error));
 
       return [];
     }
+  };
+
+  // Gemini's embedding models, listed with the key in the keyring, for 10 minutes; none without one
+  let geminiEmbeddingList: { at: number, models: string[] } | null = null;
+  const geminiEmbeddingModels = async () => {
+    if (geminiEmbeddingList && Date.now() - geminiEmbeddingList.at < 10 * 60_000) {
+      return geminiEmbeddingList.models;
+    }
+
+    const key = secrets.get(llmKeyName('gemini'));
+
+    if (!key) {
+      return [];
+    }
+
+    const response = await (options.fetch ?? fetch)('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', {
+      headers: { 'x-goog-api-key': key }, signal: AbortSignal.timeout(10_000),
+    });
+    const { models } = await response.json() as { models: { name: string, supportedGenerationMethods?: string[] }[] };
+    const names = models.filter((model) => model.supportedGenerationMethods?.includes('embedContent'))
+      .map((model) => model.name.replace(/^models\//, '')).sort();
+    geminiEmbeddingList = { at: Date.now(), models: names };
+
+    return names;
   };
 
   // When a pause ends by itself, reading goes on
@@ -824,15 +1739,15 @@ export const createKbService = (options: ServiceOptions) => {
   // Ollama keeps a model loaded for 5 minutes after its last call: a pause frees the GPU at once. The answers' model
   // loads again with the next question
   const letGoOfVisionModel = () => {
-    const { attachments } = loadSettings();
-
-    if (attachments.provider === 'ollama') {
-      (options.fetch ?? fetch)(`${attachments.ollamaUrl.replace(/\/$/, '')}/api/generate`, {
-        method: 'POST',
-        body: JSON.stringify({ model: attachments.model, keep_alive: 0 }),
-        signal: AbortSignal.timeout(10_000),
-      }).catch(() => log('Ollama didn\'t let go of the vision model'));
-    }
+    loadSettings().servers.map(imageModel).forEach((model) => {
+      if (model?.provider === 'ollama') {
+        (options.fetch ?? fetch)(`${normalizeUrl(model.ollamaUrl)}/api/generate`, {
+          method: 'POST',
+          body: JSON.stringify({ model: model.model, keep_alive: 0 }),
+          signal: AbortSignal.timeout(10_000),
+        }).catch(() => log('Ollama didn\'t let go of the vision model'));
+      }
+    });
   };
 
   const startServer = async (current: Db, port: number) => {
@@ -894,9 +1809,9 @@ export const createKbService = (options: ServiceOptions) => {
 
     try {
       const settings = loadSettings();
-      const llm = asked ?? settings.llm;
-      const model = makeModel(llm);
-      const rewritten = await rewriteQuestion(model, llm, question, history, new Date(), controller.signal, listSeries(current).map((series) => series.name));
+      const { llm } = await withFallback(asked ?? answersLlm(settings));
+      askLanes.set(askId, laneOf(llm));
+      const rewritten = await rewriteQuestion(makeModel(llm, 'rewrite', false, `turn:${turnId}`), llm, question, history, new Date(), controller.signal, listSeries(current).map((series) => series.name));
       controller.signal.throwIfAborted();
       // Asked again without what the rewrite made up
       const kept = {
@@ -972,7 +1887,7 @@ export const createKbService = (options: ServiceOptions) => {
       }
 
       let streamError: unknown;
-      const result = streamAnswer(model, llm, prepared, (error) => {
+      const result = streamAnswer(makeModel(llm, 'answer', false, `turn:${turnId}`), llm, prepared, (error) => {
         streamError = error;
       }, controller.signal);
 
@@ -995,6 +1910,8 @@ export const createKbService = (options: ServiceOptions) => {
       send(controller.signal.aborted ? { kind: 'done' } : { kind: 'error', message });
     } finally {
       asks.delete(askId);
+      askLanes.delete(askId);
+      runBackground();
     }
   };
 
@@ -1018,14 +1935,15 @@ export const createKbService = (options: ServiceOptions) => {
         throw new Error('This meeting has no text to summarize');
       }
 
-      const configured = loadSettings().llm;
+      const { llm: configured } = await withFallback(answersLlm(loadSettings()));
       const source = listSources(current).find((candidate) => candidate.id === sourceId);
-      const llm = summaryLlm(configured, source?.cloudAllowed ?? false);
+      const llm = summaryLlm(configured, source?.cloudAllowed ?? false, loadSettings());
+      askLanes.set(summaryId, laneOf(llm));
       const label = `${llm.provider} ${llm.model}`;
       local = llm !== configured;
       const calls = summaryCalls(sourceId, false);
       const startedAt = Date.now();
-      const text = await summarizeTranscript(makeModel(llm), llm, {
+      const text = await summarizeTranscript(makeModel(llm, 'summary', false, `meeting:${sourceId}:${sessionId}`), llm, {
         header: meetingHeader(meeting),
         lines,
         abortSignal: controller.signal,
@@ -1052,11 +1970,14 @@ export const createKbService = (options: ServiceOptions) => {
       }
     } finally {
       summaries.delete(summaryId);
+      askLanes.delete(summaryId);
+      runBackground();
     }
   };
 
+  // The settings form's: without what the core keeps for itself, which the form would send back
   const getSettings = (): Settings => {
-    const { embeddingRebuild, ...settings } = loadSettings();
+    const { embeddingRebuild, backgroundPaused: _paused, ...settings } = loadSettings();
 
     return { ...settings, embedding: embeddingRebuild ?? settings.embedding };
   };
@@ -1283,40 +2204,203 @@ export const createKbService = (options: ServiceOptions) => {
         throw new Error('This chat may not go to cloud AI: try an Ollama model, or allow it in Sources');
       }
 
+      await checkVision(llm);
       const { bytes } = await fetchFile(file);
       const started = Date.now();
-      const read = await describeImage(makeModel(llm), llm, bytes, imageMediaType(file), stopController.signal);
+      const read = await describeImage(makeModel(llm, 'image', false, `file:${sourceId}:${fileId}`), llm, bytes, imageMediaType(file), stopController.signal);
 
       return { ...read, model: `${llm.provider} ${llm.model}`, ms: Date.now() - started };
     },
 
-    visionModels: async ({ ollamaUrl }) => (await ollamaModels(ollamaUrl))
-      .filter((model) => model.capabilities.includes('vision')).map((model) => model.name).sort(),
+    summaryTryMeetings: () => {
+      const current = openedDb();
+      const rows = current.prepare(`
+        select d.id, d.source_id as sourceId, d.thread_id as sessionId, d.title, d.created_at as createdAt,
+          (select count(*) from chunks c where c.document_id = d.id) as chunks,
+          s.text, s.model, s.duration_ms as durationMs
+        from documents d left join summaries s on s.document_id = d.id
+        where d.kind = 'meeting' order by d.created_at desc limit 60
+      `).all() as { sourceId: number, sessionId: string, title: string, createdAt: number, chunks: number, text: string | null, model: string | null,
+        durationMs: number | null }[];
 
-    chatModels: async () => {
-      const { llm } = loadSettings();
+      return rows.filter((row) => row.chunks > 0).map((row) => {
+        const view = getMeeting(current, row.sourceId, row.sessionId);
+
+        return {
+          sourceId: row.sourceId,
+          sessionId: row.sessionId,
+          title: row.title,
+          createdAt: row.createdAt,
+          lines: view ? meetingLines(view).length : 0,
+          saved: row.text && row.model ? { text: row.text, model: row.model, durationMs: row.durationMs } : null,
+        };
+      });
+    },
+
+    // As "Summarize", with the model given, and nothing kept. It counts as a summary asked for, so the background work
+    // doesn't start another meanwhile; one already running shares the model, which the result says
+    trySummary: async ({ tryId, sourceId, sessionId, llm }) => {
+      const current = openedDb();
+      const meeting = getMeeting(current, sourceId, sessionId);
+      const lines = meeting ? meetingLines(meeting) : [];
+
+      if (!meeting || !lines.length) {
+        throw new Error('This meeting has no text to summarize');
+      }
+
+      if (!isLocalLlm(llm) && !sourceCloudAllowed(sourceId)) {
+        throw new Error('This meeting may not go to cloud AI: try an Ollama model, or allow its source in Sources');
+      }
+
+      const controller = new AbortController();
+      summaries.set(tryId, controller);
+      askLanes.set(tryId, laneOf(llm));
+      const shared = { value: runs.has(laneOf(llm)) };
+      const tokens = { input: 0, output: 0, ms: 0, counted: true };
+      let calls = 0;
+      const started = Date.now();
+
+      try {
+        const text = await summarizeTranscript(makeModel(llm, 'summary', false, `meeting:${sourceId}:${sessionId}`), llm, {
+          header: meetingHeader(meeting),
+          lines,
+          abortSignal: AbortSignal.any([stopController.signal, controller.signal]),
+          onProgress: () => {
+            shared.value ||= runs.has(laneOf(llm));
+          },
+          onText: () => undefined,
+          onCall: (call) => {
+            calls += 1;
+            tokens.ms += call.ms;
+
+            if (call.inputTokens === undefined || call.outputTokens === undefined) {
+              tokens.counted = false;
+            } else {
+              tokens.input += call.inputTokens;
+              tokens.output += call.outputTokens;
+            }
+          },
+        });
+        const ms = Date.now() - started;
+        log(`tried a summary of a meeting of source ${sourceId} with ${llm.provider} ${llm.model}: ${calls} calls, ${ms} ms`);
+
+        return {
+          llm: `${llm.provider} ${llm.model}`,
+          local: isLocalLlm(llm),
+          text,
+          ms,
+          calls,
+          inputTokens: tokens.counted ? tokens.input : null,
+          outputTokens: tokens.counted ? tokens.output : null,
+          tokensPerSecond: tokens.counted && tokens.output && tokens.ms ? Math.round((tokens.output / tokens.ms) * 10_000) / 10 : null,
+          shared: shared.value,
+        };
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw new Error('Stopped');
+        }
+
+        throw error;
+      } finally {
+        summaries.delete(tryId);
+        askLanes.delete(tryId);
+        runBackground();
+      }
+    },
+
+    aiUsage: ({ since }) => aiUsage(openedDb(), since, usageServerName),
+    aiErrors: (query) => aiErrors(openedDb(), query, usageServerName, itemName),
+    aiCalls: (query) => aiCalls(openedDb(), query, usageServerName, itemName),
+    aiCallResult: ({ item }) => itemResult(item),
+    deleteAiErrors: (query) => {
+      const deleted = deleteErrors(openedDb(), query);
+      log(`deleted ${deleted} failed AI calls from the statistics`);
+
+      return { deleted };
+    },
+
+    taskModels: async ({ task }) => {
+      const settings = loadSettings();
+      const capability = task === 'images' ? 'vision' : 'embedding';
       const models = await Promise.all([
-        ollamaModels(llm.ollamaUrl).then((found) => found
-          // Rerankers say they complete, but don't answer
-          .filter((model) => model.capabilities.includes('completion') && !model.capabilities.includes('embedding') && !/rerank/i.test(model.name))
-          .map((model): ModelChoice => ({ provider: 'ollama', model: model.name, local: isLocalLlm({ ...llm, provider: 'ollama', model: model.name }) })))
-          .catch(() => []),
+        ...settings.servers.filter((server) => server.kind === 'ollama').map(async (server) => serverChoices(server, (await ollamaModels(server.url)
+          .catch(() => [])).filter((model) => model.capabilities.includes(capability)).map((model) => model.name).sort())),
+        task === 'images'
+          ? cloudModels('gemini')
+          : geminiEmbeddingModels().then((names) => names.map((model): ModelChoice => ({ provider: 'gemini', model, local: false })), () => []),
+      ]);
+
+      const images = settings.servers.map(imageModel).find(Boolean);
+
+      return task === 'images' && !images ? models.flat() : withConfigured(models.flat(), task === 'images' ? images! : settings.embedding, settings.servers);
+    },
+
+    // Every server's chat models, by server, then Groq's and Gemini's with their key set
+    chatModels: async () => {
+      const settings = loadSettings();
+      const { servers } = settings;
+      const llm = answersLlm(settings);
+      const models = await Promise.all([
+        ...servers.filter((server) => server.kind === 'ollama').map(async (server) => serverChoices(server, await serverChatModels(server.url).catch(() => []))),
         cloudModels('groq'),
         cloudModels('gemini'),
+        cloudModels('anthropic'),
       ]);
-      const choices = models.flat();
-      // The settings' model, though its provider can't be reached now
-      const configured = choices.some((choice) => choice.provider === llm.provider && choice.model === llm.model)
-        ? []
-        : [{ provider: llm.provider, model: llm.model, local: isLocalLlm(llm) }];
 
-      return [...configured, ...choices];
+      return withConfigured(models.flat(), llm, servers);
+    },
+
+    // A cloud provider's with its key (none without it): every Gemini and Claude model reads images, Groq's none
+    serverModels: async ({ kind, url }) => {
+      if (kind !== 'ollama') {
+        const text = (await cloudModels(kind)).map((model) => model.model);
+        const failure = cloudFailures.get(kind);
+
+        return { reachable: text.length > 0, text, images: kind === 'groq' ? [] : text, ...(failure && { error: failure }) };
+      }
+
+      try {
+        const models = await ollamaModels(url);
+        await reach.check(url, true);
+
+        return {
+          reachable: true,
+          text: models.filter(answersText).map((model) => model.name),
+          images: models.filter((model) => model.capabilities.includes('vision')).map((model) => model.name),
+        };
+      } catch {
+        reach.unreachable(url);
+
+        return { reachable: false, text: [], images: [] };
+      }
+    },
+
+    setServerQueue: ({ server: id, queue }) => {
+      const settings = loadSettings();
+
+      if (!settings.servers.some((server) => serverId(server) === id)) {
+        throw new Error('No such server in Settings → AI models');
+      }
+
+      saveSettings({ ...settings, servers: settings.servers.map((server) => (serverId(server) === id ? { ...server, queue } : server)) });
+      log(`the background queue ${queue ? 'on' : 'off'} for ${id}`);
+
+      // A queue turned off lets go of the work it does now, which waits again for another server
+      if (!queue && runs.has(id)) {
+        released.add(id);
+        runs.get(id)!.controller.abort();
+      }
+
+      runBackground();
+      emitStatus();
+
+      return null;
     },
 
     pauseBackground: ({ minutes }) => {
       const until = minutes === null ? null : Date.now() + (minutes * 60_000);
       saveSettings({ ...loadSettings(), backgroundPaused: { until } });
-      imageRead?.abort();
+      runs.forEach((run) => run.task !== 'drafts' && run.controller.abort());
       letGoOfVisionModel();
       schedulePauseEnd();
       log(`the background AI work paused${minutes === null ? '' : ` for ${minutes} minutes`}`);
@@ -1402,6 +2486,134 @@ export const createKbService = (options: ServiceOptions) => {
       return messageLink(readConfig(current, doc.sourceId), room, messageId);
     },
 
+    setRepliesEnabled: ({ sourceId, enabled }) => {
+      const current = openedDb();
+      const config = rocketChatConfig(sourceId);
+      current.prepare('update sources set replies_enabled = ? where id = ?').run(enabled ? 1 : 0, sourceId);
+
+      if (enabled) {
+        // Its unread messages of the last day count, and those to come
+        writeConfig(current, sourceId, { ...config, draftsSince: Date.now() });
+        findDrafts(sourceId);
+      } else {
+        current.prepare('update drafts set state = \'dismissed\', updated_at = ? where source_id = ? and state in (\'waiting\', \'failed\')')
+          .run(Date.now(), sourceId);
+      }
+
+      log(`reply drafts ${enabled ? 'on' : 'off'} for source ${sourceId}`);
+      emitStatus();
+
+      return null;
+    },
+
+    drafts: () => {
+      const current = openedDb();
+
+      return listOpenDrafts(current).map((draft) => draftView(current, draft));
+    },
+
+    draftAction: ({ draftId, action }) => {
+      const current = openedDb();
+
+      if (!getDraft(current, draftId)) {
+        throw new Error('This draft is gone');
+      }
+
+      runs.forEach((run) => run.draftId === draftId && run.controller.abort());
+
+      updateDraft(current, draftId, action === 'dismiss' ? { state: 'dismissed' } : { state: 'waiting', asked: true, error: null });
+      emitStatus();
+
+      if (action === 'rewrite') {
+        runBackground();
+      }
+
+      return null;
+    },
+
+    draftableConversations: () => {
+      const current = openedDb();
+      const from = Date.now() - (loadSettings().drafts.maxAgeDays * 86_400_000);
+      const open = new Set(listOpenDrafts(current).map((draft) => `${draft.sourceId}\n${draft.roomId}\n${draft.threadId ?? ''}`));
+
+      return listSources(current).filter((source) => source.kind === ROCKETCHAT_KIND).flatMap((source) => {
+        const { username } = readConfig(current, source.id);
+
+        return latestFromOthers(current, source.id, username, from).map(({ roomId, threadId, message }) => ({
+          sourceId: source.id,
+          roomId,
+          threadId,
+          conversation: conversationLabel(current, { sourceId: source.id, roomId, threadId }),
+          last: { author: message.author, text: message.text, ts: message.ts },
+          drafted: open.has(`${source.id}\n${roomId}\n${threadId ?? ''}`),
+        }));
+      }).sort((a, b) => b.last.ts - a.last.ts);
+    },
+
+    draftLearning: () => {
+      const current = openedDb();
+
+      return rocketChatSources(current).reduce((sum, { sourceId, username }) => {
+        const outcomes = draftOutcomes(current, sourceId);
+
+        return {
+          replies: sum.replies + countReplies(current, sourceId, username),
+          answered: sum.answered + outcomes.answered,
+          asWritten: sum.asWritten + outcomes.asWritten,
+        };
+      }, { replies: 0, answered: 0, asWritten: 0 });
+    },
+
+    describeStyle: async () => {
+      const current = openedDb();
+      const sources = rocketChatSources(current);
+      const sample = styleSample(current, sources);
+
+      if (sample.length < 20) {
+        throw new Error('Too few of your messages yet: a Rocket.Chat source with your messages is needed');
+      }
+
+      // F8: Ollama's model unless every chat read may go to cloud AI
+      const { llm: configured } = await withFallback(answersLlm(loadSettings()));
+      const llm = summaryLlm(configured, sources.every(({ sourceId }) => sourceCloudAllowed(sourceId)), loadSettings());
+      const startedAt = Date.now();
+      const text = await describeStyle(makeModel(llm, 'style'), llm, sample, stopController.signal);
+      log(`described the user's style from ${sample.length} messages with ${llm.provider} ${llm.model}: ${text.length} characters, `
+        + `${Date.now() - startedAt} ms`);
+
+      return text;
+    },
+
+    requestDraft: ({ sourceId, roomId, threadId }) => {
+      const current = openedDb();
+      const { username } = rocketChatConfig(sourceId);
+      const [latest] = latestFromOthers(current, sourceId, username, 0, 200)
+        .filter((candidate) => candidate.roomId === roomId && candidate.threadId === threadId);
+
+      if (!latest) {
+        throw new Error('This conversation has no message from someone else to reply to');
+      }
+
+      const draftId = requestDraft(current, { sourceId, roomId, threadId, messageId: latest.message.id });
+      log(`reply draft ${draftId} of source ${sourceId} asked for by hand`);
+      emitStatus();
+      runBackground();
+
+      return null;
+    },
+
+    draftLink: ({ draftId }) => {
+      const current = openedDb();
+      const draft = getDraft(current, draftId);
+      const room = draft ? getRoom(current, draft.sourceId, draft.roomId) : undefined;
+
+      if (!draft || !room) {
+        throw new Error('This conversation is no longer in the knowledge base');
+      }
+
+      return messageLink(readConfig(current, draft.sourceId), room, draft.messageId);
+    },
+
     setCloudAllowed: ({ sourceId, allowed }) => {
       if (!setCloudAllowed(openedDb(), sourceId, allowed)) {
         throw new Error(`No source ${sourceId}`);
@@ -1420,7 +2632,13 @@ export const createKbService = (options: ServiceOptions) => {
       const next = SETTINGS.parse(params);
       const stored = loadSettings();
       const saved: StoredSettings = {
-        ...stored, attachments: next.attachments, summaries: next.summaries, llm: next.llm, server: next.server, app: next.app,
+        ...stored,
+        servers: next.servers,
+        attachments: next.attachments,
+        summaries: next.summaries,
+        drafts: next.drafts,
+        server: next.server,
+        app: next.app,
       };
 
       // A new embedding model is built in the background while the search keeps the current one (F7); choosing the
@@ -1441,6 +2659,14 @@ export const createKbService = (options: ServiceOptions) => {
       }
 
       embedError = null;
+      // A new vision model is tried at once
+      visionKnown.clear();
+      noVisionUntil.clear();
+      noVisionError = null;
+      attachmentError = null;
+      watchServers();
+      // New drafts' days: the messages they now take get theirs
+      listSources(openedDb()).filter((source) => source.repliesEnabled).forEach((source) => findDrafts(source.id));
       runEmbedding();
       runBackground();
       emitStatus();
@@ -1448,13 +2674,19 @@ export const createKbService = (options: ServiceOptions) => {
       return getSettings();
     },
 
-    keys: () => ({ groq: Boolean(getSecret(llmKeyName('groq'))), gemini: Boolean(getSecret(llmKeyName('gemini'))) }),
+    keys: () => ({
+      groq: Boolean(getSecret(llmKeyName('groq'))), gemini: Boolean(getSecret(llmKeyName('gemini'))), anthropic: Boolean(getSecret(llmKeyName('anthropic'))),
+    }),
 
     setKey: ({ provider, key }: { provider: KeyProvider, key: string }) => {
       setSecret(llmKeyName(provider), key.trim());
       log(`kept the ${provider} key`);
-      // Gemini embeddings may have waited for it
+      keyKnown.delete(provider);
+      cloudLists.delete(provider);
+      // Gemini embeddings may have waited for it, the provider's queue too
       runEmbedding();
+      runBackground();
+      emitStatus();
 
       return null;
     },
@@ -1462,6 +2694,9 @@ export const createKbService = (options: ServiceOptions) => {
     deleteKey: ({ provider }) => {
       deleteSecret(llmKeyName(provider));
       log(`removed the ${provider} key`);
+      keyKnown.delete(provider);
+      cloudLists.delete(provider);
+      emitStatus();
 
       return null;
     },
@@ -1493,6 +2728,7 @@ export const createKbService = (options: ServiceOptions) => {
         throw error;
       }
 
+      requeueWriting(db);
       const interrupted = interruptRunningTurns(db);
 
       if (interrupted) {
@@ -1508,7 +2744,9 @@ export const createKbService = (options: ServiceOptions) => {
           getToken: (sourceId) => secrets.get(tokenSecretName(getKbId(opened), sourceId)),
           embedModel: () => embeddingModelId(loadSettings().embedding),
           fetch: options.fetch,
+          webSocket: options.webSocket ?? (options.fetch ? null : globalThis.WebSocket),
           log,
+          afterSync: findDrafts,
         })],
         onStatus: emitStatus,
         onChange: () => {
@@ -1521,6 +2759,8 @@ export const createKbService = (options: ServiceOptions) => {
       runEmbedding();
       runBackground();
       schedulePauseEnd();
+      watchServers();
+      serversTimer = setInterval(watchServers, SERVERS_CHECK_MS);
       onEvent({ type: 'status', status: status() });
     },
 
@@ -1534,8 +2774,10 @@ export const createKbService = (options: ServiceOptions) => {
         clearTimeout(embedRetry);
       }
 
-      if (attachmentRetry) {
-        clearTimeout(attachmentRetry);
+      lanes.forEach((lane) => lane.timer && clearTimeout(lane.timer));
+
+      if (serversTimer) {
+        clearInterval(serversTimer);
       }
 
       if (pauseTimer) {
@@ -1549,7 +2791,7 @@ export const createKbService = (options: ServiceOptions) => {
       await server?.close();
       await runner?.stop();
       runner = null;
-      await attachmentRun;
+      await Promise.all([...lanes.values()].map((lane) => lane.run));
       await embedRun;
       db?.close();
       db = null;

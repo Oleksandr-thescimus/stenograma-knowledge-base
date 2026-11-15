@@ -1,9 +1,9 @@
 import { cn } from 'cn';
 import type { AppStatus } from '../../../../core/protocol';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { describeStatus, type SourcesTab, type Tone } from '@/lib/status';
+import { describeStatus, type StatusPage, type Tone } from '@/lib/status';
 
-// The sidebar's status line (lib/status.ts): a click opens the Sources page's tab where it's seen and fixed
+// The sidebar's status line (lib/status.ts): a click opens the page where it's seen and fixed
 
 const DOTS: Record<Tone, string> = {
   ok: 'bg-success',
@@ -14,7 +14,7 @@ const DOTS: Record<Tone, string> = {
 
 interface StatusLineProps {
   status: AppStatus | null;
-  onOpen: (tab: SourcesTab) => void;
+  onOpen: (page: StatusPage) => void;
 }
 
 const StatusLine = ({ status, onOpen }: StatusLineProps) => {
@@ -23,8 +23,8 @@ const StatusLine = ({ status, onOpen }: StatusLineProps) => {
   const line = (
     <button
       type="button"
-      disabled={!summary.tab}
-      onClick={() => summary.tab && onOpen(summary.tab)}
+      disabled={!summary.page}
+      onClick={() => summary.page && onOpen(summary.page)}
       className="mt-2 flex w-full items-start gap-2 rounded-md px-2 py-1 text-left text-xs text-muted-foreground enabled:hover:bg-accent enabled:hover:text-foreground"
     >
       <span className={cn('mt-1 size-2 shrink-0 rounded-full', DOTS[summary.tone])} aria-hidden />

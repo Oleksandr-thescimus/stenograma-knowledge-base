@@ -1,19 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Loader2, ScanText } from 'lucide-react';
 import { cn } from 'cn';
-import type { AttachmentSettings, AttachmentStatus, ImageChoice, ImageTry } from '../../../../core/protocol';
+import type { AiServer, AttachmentSettings, ImageChoice, ImageTry, LlmSettings } from '../../../../core/protocol';
 import ChatImage from '@/components/ChatImage';
-import ImagePause from '@/components/ImagePause';
+import Expandable from '@/components/Expandable';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { formatDay } from '@/lib/format';
 import { errorMessage } from '@/lib/kb';
 
-// Images and files in chats (F3): the vision model that reads images, the period read, documents, the queue's status,
-// and a try of the model (as set here, saved or not) on an image of the chats, which keeps nothing
+// Images and files in chats (F3): what is read, of when, and a try of the vision model (Settings → AI models) on an image
+// of the chats, which keeps nothing. Their queue is on the Activity page
 
 const PERIODS = [
   { value: '1', label: 'The last month' },
@@ -22,58 +21,18 @@ const PERIODS = [
   { value: '12', label: 'The last 12 months' },
   { value: '0', label: 'All' },
 ];
-const DEFAULT_MODELS = { ollama: 'qwen3.5:9b', gemini: 'gemini-2.5-flash' };
+// The servers' image models, in the settings' order
+const imageModels = (servers: AiServer[]) => servers.filter((server) => server.images && server.kind !== 'groq').map((server) => ({
+  key: `${server.kind}|${server.url}|${server.images}`,
+  label: `${server.images} · ${server.name}`,
+  llm: { provider: server.kind, model: server.images, ollamaUrl: server.kind === 'ollama' ? server.url : '' } as LlmSettings,
+}));
 
-const ModelField = ({ settings, onChange }: { settings: AttachmentSettings, onChange: (patch: Partial<AttachmentSettings>) => void }) => {
-  const [models, setModels] = useState<string[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (settings.provider !== 'ollama') {
-      return undefined;
-    }
-
-    let alive = true;
-    setError(null);
-    window.kb.invoke('visionModels', { ollamaUrl: settings.ollamaUrl })
-      .then((found) => alive && setModels(found))
-      .catch((reason: unknown) => {
-        if (alive) {
-          setModels(null);
-          setError(errorMessage(reason));
-        }
-      });
-
-    return () => {
-      alive = false;
-    };
-  }, [settings.provider, settings.ollamaUrl]);
-
-  if (settings.provider === 'ollama' && models?.length) {
-    const choices = models.includes(settings.model) ? models : [settings.model, ...models];
-
-    return (
-      <Select value={settings.model} onValueChange={(model) => onChange({ model })}>
-        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-        <SelectContent>
-          {choices.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}
-        </SelectContent>
-      </Select>
-    );
-  }
-
-  return (
-    <div className="space-y-1">
-      <Input id="image-model" value={settings.model} onChange={(event) => onChange({ model: event.target.value })} />
-      {settings.provider === 'ollama' && (
-        <p className="text-xs text-muted-foreground">{error ?? (models ? 'None of Ollama\'s models reads images.' : 'Listing Ollama\'s models…')}</p>
-      )}
-    </div>
-  );
-};
-
-// The model on an image of the chats, as a try
-const ImageTryPanel = ({ settings }: { settings: AttachmentSettings }) => {
+// A model on an image of the chats, as a try
+const ImageTryPanel = ({ servers }: { servers: AiServer[] }) => {
+  const models = imageModels(servers);
+  const [modelKey, setModelKey] = useState(models[0]?.key ?? '');
+  const model = (models.find((candidate) => candidate.key === modelKey) ?? models[0])?.llm;
   const [images, setImages] = useState<ImageChoice[] | null>(null);
   const [chosen, setChosen] = useState<ImageChoice | null>(null);
   const [result, setResult] = useState<ImageTry | null>(null);
@@ -94,7 +53,7 @@ const ImageTryPanel = ({ settings }: { settings: AttachmentSettings }) => {
         setResult(await window.kb.invoke('tryImageModel', {
           sourceId: chosen.sourceId,
           fileId: chosen.fileId,
-          model: { provider: settings.provider, model: settings.model, ollamaUrl: settings.ollamaUrl },
+          model: model!,
         }));
       } catch (reason) {
         setError(errorMessage(reason));
@@ -110,7 +69,6 @@ const ImageTryPanel = ({ settings }: { settings: AttachmentSettings }) => {
 
   return (
     <div className="space-y-3">
-      <Label>Try it on an image of the chats</Label>
       <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">
         {images?.slice(0, 12).map((image) => (
           <ChatImage
@@ -132,9 +90,17 @@ const ImageTryPanel = ({ settings }: { settings: AttachmentSettings }) => {
             <ChatImage sourceId={chosen.sourceId} fileId={chosen.fileId} name={chosen.name} className="h-32 w-48 shrink-0" />
             <div className="min-w-0 space-y-2 text-sm">
               <p className="truncate text-muted-foreground">{chosen.name} · {chosen.room} · {formatDay(chosen.ts)}</p>
-              <Button size="sm" onClick={tryIt} disabled={busy || !settings.model.trim()}>
+              {models.length > 1 && (
+                <Select value={modelKey || models[0].key} onValueChange={setModelKey}>
+                  <SelectTrigger size="sm" className="w-64" aria-label="The model to try"><SelectValue /></SelectTrigger>
+                  <SelectContent position="popper">
+                    {models.map((candidate) => <SelectItem key={candidate.key} value={candidate.key}>{candidate.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              )}
+              <Button size="sm" onClick={tryIt} disabled={busy || !model}>
                 {busy ? <Loader2 className="animate-spin" /> : <ScanText />}
-                {busy ? `Reading with ${settings.model}…` : `Read with ${settings.model}`}
+                {busy ? `Reading with ${model?.model}…` : `Read with ${model?.model ?? 'no image model'}`}
               </Button>
             </div>
           </div>
@@ -155,16 +121,19 @@ const ImageTryPanel = ({ settings }: { settings: AttachmentSettings }) => {
   );
 };
 
-interface ImageSettingsProps {
+interface FileSettingsProps {
   settings: AttachmentSettings;
-  saved: AttachmentSettings;
-  status: AttachmentStatus | undefined;
+  // The servers as set, and as saved: the images are read again only with the image models saved
+  servers: AiServer[];
+  savedServers: AiServer[];
   onChange: (patch: Partial<AttachmentSettings>) => void;
 }
 
-const ImageSettings = ({ settings, saved, status, onChange }: ImageSettingsProps) => {
+// Settings → Chats: what is read of the chats' files and of when; reading the images again with the model saved, and a
+// try of the model (as set in AI models, saved or not)
+const FileSettings = ({ settings, servers, savedServers, onChange }: FileSettingsProps) => {
   const [again, setAgain] = useState<string | null>(null);
-  const modelChanged = settings.provider !== saved.provider || settings.model !== saved.model;
+  const modelChanged = JSON.stringify(imageModels(servers).map((model) => model.key)) !== JSON.stringify(imageModels(savedServers).map((model) => model.key));
 
   const readAgain = async () => {
     try {
@@ -179,71 +148,30 @@ const ImageSettings = ({ settings, saved, status, onChange }: ImageSettingsProps
     <div className="space-y-4">
       <label className="flex items-center gap-2 text-sm">
         <Switch checked={settings.describeImages} onCheckedChange={(describeImages) => onChange({ describeImages })} />
-        Read images: their text word for word, and what they show
+        Read images: their text word for word, and what they show (by the servers&apos; image models in AI models)
       </label>
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="space-y-1.5">
-          <Label>Provider</Label>
-          <Select
-            value={settings.provider}
-            onValueChange={(provider) => onChange({ provider: provider as AttachmentSettings['provider'], model: DEFAULT_MODELS[provider as 'ollama' | 'gemini'] })}
-          >
-            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="ollama">Ollama, on this computer</SelectItem>
-              <SelectItem value="gemini">Gemini</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="image-model">Model</Label>
-          <ModelField settings={settings} onChange={onChange} />
-        </div>
-        {settings.provider === 'ollama' && (
-          <div className="space-y-1.5">
-            <Label htmlFor="image-ollama">Ollama&apos;s address</Label>
-            <Input id="image-ollama" value={settings.ollamaUrl} onChange={(event) => onChange({ ollamaUrl: event.target.value })} />
-          </div>
-        )}
-        <div className="space-y-1.5">
-          <Label>Files of</Label>
-          <Select value={String(settings.months)} onValueChange={(months) => onChange({ months: Number(months) })}>
-            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {PERIODS.map(({ value, label }) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-      {settings.provider === 'gemini' && (
-        <p className="text-xs text-muted-foreground">
-          Only chats that may go to cloud AI are sent to Gemini; the others&apos; images are read by Ollama&apos;s
-          {' '}
-          {DEFAULT_MODELS.ollama}.
-        </p>
-      )}
       <label className="flex items-center gap-2 text-sm">
         <Switch checked={settings.readDocuments} onCheckedChange={(readDocuments) => onChange({ readDocuments })} />
         Read PDFs and text files (without a model; a scanned PDF has no text)
       </label>
-      {status && (
-        <p className="flex items-center gap-2 text-sm text-muted-foreground">
-          {status.running && <Loader2 className="size-4 animate-spin" />}
-          {status.done} read · {status.pending} waiting{status.failed ? ` · ${status.failed} not read` : ''}
-          {status.running && ' · reading'}
-        </p>
-      )}
-      {status?.error && <p className="text-sm text-destructive">{status.error}. It&apos;s tried again in a minute.</p>}
-      {status && settings.describeImages && <ImagePause status={status} />}
+      <div className="space-y-1.5">
+        <Label>Files of</Label>
+        <Select value={String(settings.months)} onValueChange={(months) => onChange({ months: Number(months) })}>
+          <SelectTrigger className="w-64"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {PERIODS.map(({ value, label }) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
       <div className="flex items-center gap-3">
         <Button size="sm" variant="outline" onClick={readAgain} disabled={modelChanged}>Read all images again</Button>
         <span className="text-xs text-muted-foreground">
-          {modelChanged ? 'Save the new model first.' : again ?? 'With the model saved: the ones read before keep theirs until then.'}
+          {modelChanged ? 'Save the new image models first.' : again ?? 'With the image models saved: the ones read before keep theirs until then.'}
         </span>
       </div>
-      <ImageTryPanel settings={settings} />
+      <Expandable label="Try an image model on an image of the chats"><ImageTryPanel servers={servers} /></Expandable>
     </div>
   );
 };
 
-export default ImageSettings;
+export default FileSettings;
