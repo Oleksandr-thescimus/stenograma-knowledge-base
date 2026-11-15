@@ -12,6 +12,8 @@ export interface SummaryRun {
   done: number;
   all: number;
   llm: string | null;
+  // Where it runs, by its name: "orangepi"
+  server?: string;
   startedAt: number;
 }
 
@@ -56,7 +58,7 @@ export const useMeetingSummary = (meeting: MeetingView | null | undefined) => {
 
     switch (part.kind) {
       case 'progress':
-        setRun((current) => current && { ...current, done: part.done, all: part.all, llm: part.llm });
+        setRun((current) => current && { ...current, done: part.done, all: part.all, llm: part.llm, server: part.server });
         break;
       case 'text':
         setRun((current) => current && { ...current, text: current.text + part.text });

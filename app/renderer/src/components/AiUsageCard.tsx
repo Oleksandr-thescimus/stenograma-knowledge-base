@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import { cn } from 'cn';
 import type { AiCallGroup, AiCallResult, AiError, AiErrorsQuery, AiTask, AiUsage, CitedSource, UsageRow } from '../../../../core/protocol';
 import MeetingDialog from '@/components/MeetingDialog';
 import { Button } from '@/components/ui/button';
@@ -322,15 +323,98 @@ const Cells = ({ row, chunks, onErrors, onCalls }: { row: UsageRow, chunks?: boo
   </>
 );
 
-const Head = ({ first }: { first: string }) => (
+// A table sorted by a column, as clicked on its head: the numbers the most first, the names from A, a second click the
+// other way; none, the core's order (the most calls first)
+type SortKey = 'name' | 'calls' | 'ms' | 'tokens' | 'speed' | 'errors';
+interface Sort { key: SortKey, descending: boolean }
+
+const COLUMNS: { key: SortKey, label: string, title?: string }[] = [
+  { key: 'calls', label: 'Calls' },
+  { key: 'ms', label: 'Time' },
+  { key: 'tokens', label: 'Tokens in / out', title: 'Input / output tokens; sorted by both together' },
+  { key: 'speed', label: 'Tokens/s' },
+  { key: 'errors', label: 'Errors' },
+];
+
+const valueOf = (row: UsageRow, key: Exclude<SortKey, 'name'>) => {
+  switch (key) {
+    case 'calls':
+      return row.calls;
+    case 'ms':
+      return row.ms;
+    case 'tokens':
+      return row.inputTokens + row.outputTokens;
+    case 'speed':
+      return row.tokensPerSecond;
+    default:
+      return row.errors;
+  }
+};
+
+// A speed not known goes last, whichever way
+const sortRows = <T extends UsageRow>(rows: T[], sort: Sort | null, nameOf: (row: T) => string) => {
+  if (!sort) {
+    return rows;
+  }
+
+  const way = sort.descending ? -1 : 1;
+
+  return [...rows].sort((a, b) => {
+    if (sort.key === 'name') {
+      return way * nameOf(a).localeCompare(nameOf(b));
+    }
+
+    const [x, y] = [valueOf(a, sort.key), valueOf(b, sort.key)];
+
+    if (x === null || y === null) {
+      return Number(x === null) - Number(y === null);
+    }
+
+    return way * (x - y);
+  });
+};
+
+const SortHead = ({ label, title, sortKey, sort, onSort, className }: {
+  label: string, title?: string, sortKey: SortKey, sort: Sort | null, onSort: (sort: Sort) => void, className: string,
+}) => {
+  const active = sort?.key === sortKey;
+  const Arrow = sort?.descending ? ArrowDown : ArrowUp;
+  let ariaSort: 'ascending' | 'descending' | 'none' = 'none';
+
+  if (active) {
+    ariaSort = sort.descending ? 'descending' : 'ascending';
+  }
+
+  return (
+    <th className={className} aria-sort={ariaSort}>
+      <button
+        type="button"
+        title={title}
+        className={cn('inline-flex items-center gap-1 hover:text-foreground', active && 'text-foreground')}
+        onClick={() => onSort({ key: sortKey, descending: active ? !sort.descending : sortKey !== 'name' })}
+      >
+        {label}
+        {active && <Arrow className="size-3" />}
+      </button>
+    </th>
+  );
+};
+
+const Head = ({ first, sort, onSort }: { first: string, sort: Sort | null, onSort: (sort: Sort) => void }) => (
   <thead>
     <tr className="border-b text-xs text-muted-foreground">
-      <th className="py-1.5 pr-3 text-left font-normal">{first}</th>
-      <th className="py-1.5 pr-3 text-right font-normal">Calls</th>
-      <th className="py-1.5 pr-3 text-right font-normal">Time</th>
-      <th className="py-1.5 pr-3 text-right font-normal" title="Input / output tokens">Tokens in / out</th>
-      <th className="py-1.5 pr-3 text-right font-normal">Tokens/s</th>
-      <th className="py-1.5 text-right font-normal">Errors</th>
+      <SortHead label={first} sortKey="name" sort={sort} onSort={onSort} className="py-1.5 pr-3 text-left font-normal" />
+      {COLUMNS.map((column, index) => (
+        <SortHead
+          key={column.key}
+          label={column.label}
+          title={column.title}
+          sortKey={column.key}
+          sort={sort}
+          onSort={onSort}
+          className={cn('py-1.5 text-right font-normal', index < COLUMNS.length - 1 && 'pr-3')}
+        />
+      ))}
     </tr>
   </thead>
 );
@@ -343,6 +427,8 @@ const AiUsageCard = ({ links }: { links: CallLinks }) => {
   const [callsOf, setCallsOf] = useState<{ title: string, query: AiErrorsQuery } | null>(null);
   // Listed again at once after errors are deleted
   const [reloads, setReloads] = useState(0);
+  const [taskSort, setTaskSort] = useState<Sort | null>(null);
+  const [modelSort, setModelSort] = useState<Sort | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -414,9 +500,9 @@ const AiUsageCard = ({ links }: { links: CallLinks }) => {
           </p>
           <div className="overflow-x-auto">
             <table className="w-full">
-              <Head first="Task" />
+              <Head first="Task" sort={taskSort} onSort={setTaskSort} />
               <tbody>
-                {usage.tasks.map((row) => (
+                {sortRows(usage.tasks, taskSort, (row) => TASKS[row.task] ?? row.task).map((row) => (
                   <tr key={row.task} className="border-b last:border-b-0">
                     <td className="py-1.5 pr-3">{TASKS[row.task] ?? row.task}</td>
                     <Cells
@@ -434,9 +520,9 @@ const AiUsageCard = ({ links }: { links: CallLinks }) => {
           </div>
           <div className="overflow-x-auto">
             <table className="w-full">
-              <Head first="Model" />
+              <Head first="Model" sort={modelSort} onSort={setModelSort} />
               <tbody>
-                {usage.models.map((row) => (
+                {sortRows(usage.models, modelSort, (row) => `${row.model} ${row.server}`).map((row) => (
                   <tr key={`${row.provider}|${row.server}|${row.model}`} className="border-b last:border-b-0">
                     <td className="py-1.5 pr-3">
                       {row.model}

@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import MarkdownText from '@/components/MarkdownText';
-import { formatDay, formatOffset, formatWhen } from '@/lib/format';
+import { formatDay, formatOffset, formatWhen, modelOnServer } from '@/lib/format';
 import { errorMessage } from '@/lib/kb';
 import { citedRange } from '@/lib/meeting';
 import { useMeetingSummary, type SummaryRun } from '@/lib/summary';
@@ -72,7 +72,7 @@ const ShortSummaryPanel = ({ text, saved, writing }: { text: string, saved: Shor
 };
 
 const describeRun = (run: SummaryRun) => {
-  const llm = run.llm ? ` with ${run.llm}` : '';
+  const llm = run.llm ? ` with ${modelOnServer(run.llm, run.server)}` : '';
 
   if (run.text) {
     return `Writing the summary${llm}…`;

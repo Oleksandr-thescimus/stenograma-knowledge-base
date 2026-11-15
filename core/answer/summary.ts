@@ -47,6 +47,9 @@ summary.
 - Merge what repeats; keep every decision and task.
 - No introduction and no conclusion, only the bullet points.`;
 
+// The model answered nothing: its fault, not the meeting's (the background queue stops its server, as for a refusal)
+export class EmptyAnswerError extends Error {}
+
 // The input a summary's call may take, undefined for no limit
 export const summaryInputBudget = (settings: LlmSettings) => (settings.provider === 'ollama'
   ? OLLAMA_CONTEXT_TOKENS - MAX_SUMMARY_TOKENS
@@ -135,6 +138,12 @@ export const summarizeTranscript = async (model: LanguageModel, settings: LlmSet
         ...call,
       });
       onCall?.({ kind: notes ? 'combine' : 'notes', ms: Date.now() - started, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens });
+
+      // A model that only thought, or said nothing: its empty notes would leave the part out of the summary unsaid
+      if (!text.trim()) {
+        throw new EmptyAnswerError('The model gave no notes for a part of the meeting');
+      }
+
       next.push(text.trim());
       done += 1;
       onProgress(done, all);
@@ -178,7 +187,7 @@ export const summarizeTranscript = async (model: LanguageModel, settings: LlmSet
   }
 
   if (!summary.trim()) {
-    throw new Error('The model gave no summary');
+    throw new EmptyAnswerError('The model gave no summary');
   }
 
   if (onCall) {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Loader2 } from 'lucide-react';
-import type { KeyProvider, ModelChoice, Settings } from '../../../../core/protocol';
+import type { ModelChoice, Settings } from '../../../../core/protocol';
 import DraftStyleField from '@/components/DraftStyleField';
 import Expandable from '@/components/Expandable';
 import FileSettings from '@/components/ImageSettings';
@@ -72,7 +72,7 @@ const SettingsPage = ({ onOpenActivity }: { onOpenActivity: () => void }) => {
   const status = useAppStatus();
   const [saved, setSaved] = useState<Settings | null>(null);
   const [form, setForm] = useState<Settings | null>(null);
-  const [keys, setKeys] = useState<Record<KeyProvider, boolean> | null>(null);
+  const [keys, setKeys] = useState<Record<string, boolean> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [justSaved, setJustSaved] = useState(false);
@@ -97,7 +97,9 @@ const SettingsPage = ({ onOpenActivity }: { onOpenActivity: () => void }) => {
     }).catch((reason: unknown) => setError(errorMessage(reason)));
   }, [running, queues]);
 
-  const readKeys = () => window.kb.invoke('keys', {}).then(setKeys).catch((reason: unknown) => setError(errorMessage(reason)));
+  // An OpenAI-compatible API's key is its address's: asked for those typed
+  const openaiUrls = JSON.stringify((form?.servers ?? []).filter((server) => server.kind === 'openai' && URL.canParse(server.url)).map((server) => server.url));
+  const readKeys = () => window.kb.invoke('keys', { urls: JSON.parse(openaiUrls) as string[] }).then(setKeys).catch((reason: unknown) => setError(errorMessage(reason)));
 
   // Every saved server's models, and the cloud's with their keys: listed again when the keys or the servers change
   const savedServers = JSON.stringify(saved?.servers);
@@ -109,10 +111,15 @@ const SettingsPage = ({ onOpenActivity }: { onOpenActivity: () => void }) => {
   }, [running, keys, savedServers]);
 
   useEffect(() => {
-    if (running) {
-      readKeys();
+    if (!running) {
+      return undefined;
     }
-  }, [running]);
+
+    // A moment after an address is typed
+    const timer = setTimeout(readKeys, 400);
+
+    return () => clearTimeout(timer);
+  }, [running, openaiUrls]);
 
   if (!form || !saved) {
     return (

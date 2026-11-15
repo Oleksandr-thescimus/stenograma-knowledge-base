@@ -25,7 +25,7 @@ const PERIODS = [
 const imageModels = (servers: AiServer[]) => servers.filter((server) => server.images && server.kind !== 'groq').map((server) => ({
   key: `${server.kind}|${server.url}|${server.images}`,
   label: `${server.images} · ${server.name}`,
-  llm: { provider: server.kind, model: server.images, ollamaUrl: server.kind === 'ollama' ? server.url : '' } as LlmSettings,
+  llm: { provider: server.kind, model: server.images, ollamaUrl: server.kind === 'ollama' || server.kind === 'openai' ? server.url : '' } as LlmSettings,
 }));
 
 // A model on an image of the chats, as a try

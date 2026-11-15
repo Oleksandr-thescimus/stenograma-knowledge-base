@@ -134,7 +134,7 @@ const App = () => {
       <main className="flex min-w-0 flex-1 flex-col bg-background">
         {status && <ProcessBanner status={status} />}
         <div className="min-h-0 flex-1">
-          <div className={cn('h-full', page !== 'chat' && 'hidden')}><ChatPage chats={chats} /></div>
+          <div className={cn('h-full', page !== 'chat' && 'hidden')}><ChatPage chats={chats} active={page === 'chat'} /></div>
           <div className={cn('h-full', page !== 'drafts' && 'hidden')}><DraftsPage onOpenSources={() => setPage('sources')} /></div>
           <div className={cn('h-full', page !== 'sources' && 'hidden')}><SourcesPage /></div>
           <div className={cn('h-full', page !== 'activity' && 'hidden')}><ActivityPage links={{ onOpenChat: chooseChat, onOpenDrafts: () => setPage('drafts') }} /></div>

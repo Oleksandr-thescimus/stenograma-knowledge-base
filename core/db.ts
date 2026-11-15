@@ -317,6 +317,10 @@ const MIGRATIONS: (string | ((db: Db) => void))[] = [
   `
   alter table ai_calls add column item text;
   `,
+  // The server a draft was written on (its name, as Settings had it then), shown with its model
+  `
+  alter table drafts add column server text;
+  `,
 ];
 
 // sqlite-vec's path points inside app.asar in a packaged app, which SQLite's dlopen can't read (M0)

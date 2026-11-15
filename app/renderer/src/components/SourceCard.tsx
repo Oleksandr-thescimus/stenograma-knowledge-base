@@ -235,12 +235,13 @@ const SourceCard = ({ source, nameOf, onAction }: SourceCardProps) => {
       {error && <p className="mt-2 text-sm text-destructive">{error}</p>}
       <div className="mt-3 flex items-center gap-2 pl-[3.25rem] text-sm">
         <Switch checked={source.cloudAllowed} onCheckedChange={setCloud} aria-label="May go to cloud AI" />
-        <span className={source.cloudAllowed ? '' : 'text-muted-foreground'}>{source.cloudAllowed ? 'May go to cloud AI' : 'Only on this computer'}</span>
+        {/* One label whatever the state, as "Draft replies": a label that changed with it read as a second option */}
+        <span className={source.cloudAllowed ? '' : 'text-muted-foreground'}>May go to cloud AI</span>
         <Hint
           label="What cloud AI sees"
           text={source.cloudAllowed
-            ? 'Its content may go to Groq, Gemini or Claude when they answer, and to Gemini\'s embeddings.'
-            : 'Only Ollama on this computer sees it; with a cloud model it\'s left out of answers.'}
+            ? 'On: its content may go to the cloud servers in Settings → AI models (Groq, Gemini, Claude, Ollama Cloud, OpenAI-compatible APIs) when they answer or take the background work, and to Gemini\'s embeddings.'
+            : 'Off: only your own Ollama servers see it (this computer, and one through a tunnel at 127.0.0.1); with a cloud model it\'s left out of answers.'}
         />
       </div>
       {source.kind === 'rocketchat' && (

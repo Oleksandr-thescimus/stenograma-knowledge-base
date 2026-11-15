@@ -527,6 +527,31 @@ on the release") and draft replies to new emails and messages.
     source): more rooms changed in a minute than it allows wait for the next one.
   - No new service: the same server and token. Node's own `WebSocket` (Electron 45's Node 24), no package. What
     arrives is never logged (a room's change carries its last message). The source's card says "Live".
+- **Ollama Cloud is a cloud provider** (2026-11-15), next to Groq, Gemini and Claude in Settings → AI models: Ollama's
+  own API at `https://ollama.com/api` with the user's key as a bearer token (keyring `llm:ollama-cloud`, or
+  `yarn kb key set ollama-cloud`), through the same `ollama-ai-provider-v2`. Not an Ollama server with an address: it
+  isn't the user's, so F8 holds it to the sources that may go to cloud AI, and its key needs the keyring. Its models
+  come from `/api/tags`, those that read images from each one's `/api/show` capabilities. No `think: false` and no
+  `num_ctx` (its models have their own); no rate-limit headers known, so its limits show only as refusals.
+- **A server that refuses all its work stops its queue, not the work** (2026-11-15): Ollama Cloud without credits
+  answered 402 to every call, and each meeting it took was skipped until a restart, 42 in a minute, so the other
+  servers had none left. A 401, 402, 403, 404 or 410 (a wrong key, no credits, no access, a model it hasn't or
+  retired; `serverRefusalOf`) now puts the meeting, draft or image back to wait for the other servers and stops that
+  server's lane for 30 minutes, or until its models or key change. Activity says what the server answered.
+- **OpenAI-compatible APIs as servers** (2026-11-15), for the free cloud tiers like Groq's: Cerebras, OpenRouter,
+  Mistral, NVIDIA, SambaNova, GitHub Models (presets in Settings → AI models), or any other by its address. One kind
+  (`openai`) instead of a provider each, through `@ai-sdk/openai-compatible` (2.0.88, the AI SDK 6 line). Like an
+  Ollama server it's known by its address (`url`, an LlmSettings's `ollamaUrl`), so there may be several; its key is
+  the address's (keyring `llm:openai:<address>`, `yarn kb key set openai <address>`). Always a cloud provider (F8),
+  even at a loopback address; added with its queue off. Models from `GET <address>/models`; those that read images
+  from OpenRouter's `input_modalities`, any when the API doesn't say. Free tiers' terms differ: some keep the
+  prompts or train on them (OpenRouter's `:free` models, Mistral's Experiment plan), which the sources' "May go to
+  cloud AI" should weigh.
+- **Room to think for cloud models** (2026-11-15): Qwen 3 and gpt-oss on Cerebras think before they answer, and the
+  thinking counts against the cap on output, so on a long meeting a part's notes (1024) or the summary (1536) were
+  all thinking and came back empty ("The model gave no summary"). OpenAI-compatible APIs and Ollama Cloud now get
+  Claude's 16000 too (`withRoomToThink`, `core/llm.ts`). An empty answer (`EmptyAnswerError`), notes included, stops
+  that server's summaries like a refusal instead of skipping meeting after meeting.
 
 ## Why Electron, with a core of its own
 
@@ -797,7 +822,8 @@ without approval, a people directory that joins one person's names across source
   - `summaries`: the app's short summary of a document (a meeting), with the hash of the text it summarized, the
     model, and how long it took in how many calls (null for those made before 2026-11-13); it goes with its document.
   - `drafts` (2026-11-14, Rocket.Chat first): source, conversation (room and thread), the message replied to, why it
-    got one (`direct`, `mention`, `thread`), text, the sources it was given, model, error, state (`waiting`, `writing`,
+    got one (`direct`, `mention`, `thread`), text, the sources it was given, model, `server` (its name then, shown
+    with the model; 2026-11-15), error, state (`waiting`, `writing`,
     `ready`, `failed`; closed as `dismissed`, `replied`, `superseded`; `sent` from M8), createdAt, `asked`, and
     `sent_message_id` (the user's message that answered it, for their style); and `sent_log` (M8).
   - `ai_calls` (2026-11-14): a row per model call, each try of it, for the AI's statistics: when, ms, task (`answer`,

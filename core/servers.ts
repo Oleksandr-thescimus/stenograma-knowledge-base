@@ -1,7 +1,7 @@
-import type { AiServer, AiServerKind, BackgroundTask, EmbeddingSettings, LlmSettings, Settings } from './protocol.ts';
+import type { AiServer, AiServerKind, BackgroundTask, EmbeddingSettings, LlmProvider, LlmSettings, Settings } from './protocol.ts';
 
 // The AI servers (Ollama's API: this computer's Ollama, an Orange Pi's RKLLama through a tunnel; Groq's and Gemini's
-// and Claude's APIs), in the chat's order, each with its models for text and images and whether it takes the background work. The
+// and Claude's APIs, Ollama Cloud's, and OpenAI-compatible ones: Cerebras, OpenRouter, Mistral…), in the chat's order, each with its models for text and images and whether it takes the background work. The
 // background work runs a queue per server, each taking the next meeting, draft or image it has a model for, so the
 // Orange Pi summarizes while this computer reads images and answers; work gives way only to what the user asked for on
 // the same server
@@ -12,19 +12,28 @@ export const sameUrl = (a: string, b: string) => normalizeUrl(a) === normalizeUr
 export const normalizeUrl = (url: string) => url.trim().replace(/\/+$/, '').toLowerCase();
 
 export const OLLAMA_URL = 'http://127.0.0.1:11434';
-export const CLOUD_NAMES: Record<Exclude<AiServerKind, 'ollama'>, string> = { groq: 'Groq', gemini: 'Gemini', anthropic: 'Claude' };
+export const CLOUD_NAMES: Record<Exclude<AiServerKind, 'ollama' | 'openai'>, string> = {
+  groq: 'Groq', gemini: 'Gemini', anthropic: 'Claude', 'ollama-cloud': 'Ollama Cloud',
+};
 
-// A server's own id: an Ollama server's address, else its provider; the lane of its queue too
-export const serverId = (server: Pick<AiServer, 'kind' | 'url'>) => (server.kind === 'ollama' ? normalizeUrl(server.url) : server.kind);
+// An Ollama server and an OpenAI-compatible API are known by their address, there may be several; the others are one
+// each, known by their provider
+export const hasAddress = (kind: AiServerKind | LlmProvider) => kind === 'ollama' || kind === 'openai';
 
-// An Ollama model's server, else its cloud provider
-export const laneOf = (model: Pick<ModelRef, 'provider' | 'ollamaUrl'>) => (model.provider === 'ollama' ? normalizeUrl(model.ollamaUrl) : model.provider);
+// A server's own id: an Ollama server's or OpenAI-compatible API's address, else its provider; the lane of its queue too
+export const serverId = (server: Pick<AiServer, 'kind' | 'url'>) => (hasAddress(server.kind) ? normalizeUrl(server.url) : server.kind);
+
+// A model's server: its address, else its cloud provider
+export const laneOf = (model: Pick<ModelRef, 'provider' | 'ollamaUrl'>) => (hasAddress(model.provider) ? normalizeUrl(model.ollamaUrl) : model.provider);
+
+// Its key's name in the keyring, after "llm:": the provider's, an OpenAI-compatible API's by its address
+export const keyIdOf = ({ kind, url }: { kind: AiServerKind | LlmProvider, url: string }) => (kind === 'openai' ? `openai:${normalizeUrl(url)}` : kind);
 
 // What reads documents needs no model: a lane of its own
 export const DOCUMENTS_LANE = 'documents';
 
 const modelOn = (server: AiServer, model: string): LlmSettings => ({
-  provider: server.kind, model, ollamaUrl: server.kind === 'ollama' ? server.url : '',
+  provider: server.kind, model, ollamaUrl: hasAddress(server.kind) ? server.url : '',
 });
 
 export const textModel = (server: AiServer) => (server.text ? modelOn(server, server.text) : null);
@@ -50,18 +59,18 @@ export const answersLlm = (settings: Pick<Settings, 'servers'>) => textModels(se
 export const localTextLlm = (settings: Pick<Settings, 'servers'>) => textModels(settings)
   .find((model) => model.provider === 'ollama' && isLoopbackUrl(model.ollamaUrl)) ?? DEFAULT_LOCAL;
 
-export const serverOf = (servers: AiServer[], model: Pick<ModelRef, 'provider' | 'ollamaUrl'>) => servers.find((server) => (model.provider === 'ollama'
-  ? server.kind === 'ollama' && sameUrl(server.url, model.ollamaUrl)
-  : server.kind === model.provider));
+export const serverOf = (servers: AiServer[], model: Pick<ModelRef, 'provider' | 'ollamaUrl'>) => servers.find((server) => server.kind === model.provider
+  && (!hasAddress(model.provider) || sameUrl(server.url, model.ollamaUrl)));
 
 // "Orange Pi", "Groq"; an address no server has, as it is
 export const whereLabel = (servers: AiServer[], model: Pick<ModelRef, 'provider' | 'ollamaUrl'>) => serverOf(servers, model)?.name
-  ?? (model.provider === 'ollama' ? normalizeUrl(model.ollamaUrl) : CLOUD_NAMES[model.provider]);
+  ?? (hasAddress(model.provider) ? normalizeUrl(model.ollamaUrl) : CLOUD_NAMES[model.provider as keyof typeof CLOUD_NAMES]);
 
 const CLOUD: AiServer[] = [
   { name: 'Groq', kind: 'groq', url: '', text: '', images: '', queue: false },
   { name: 'Gemini', kind: 'gemini', url: '', text: '', images: '', queue: false },
   { name: 'Claude', kind: 'anthropic', url: '', text: '', images: '', queue: false },
+  { name: 'Ollama Cloud', kind: 'ollama-cloud', url: '', text: '', images: '', queue: false },
 ];
 
 export const DEFAULT_SERVERS: AiServer[] = [

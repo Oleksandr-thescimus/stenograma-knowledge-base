@@ -3,10 +3,12 @@
 //
 // renderer ──window.kb (preload, IPC)──▶ main ──MessagePort──▶ core (utilityProcess: core/service.ts)
 
-export type LlmProvider = 'groq' | 'gemini' | 'anthropic' | 'ollama';
+export type LlmProvider = 'groq' | 'gemini' | 'anthropic' | 'ollama-cloud' | 'openai' | 'ollama';
 export type EmbeddingProviderName = 'ollama' | 'gemini';
-// The providers whose keys the app keeps in the keyring; Gemini's serves its embeddings too. Anthropic's is Claude
-export type KeyProvider = 'groq' | 'gemini' | 'anthropic';
+// The providers whose keys the app keeps in the keyring; Gemini's serves its embeddings too. Anthropic's is Claude;
+// Ollama Cloud's is Ollama's API at ollama.com, a cloud provider like the others (F8). An OpenAI-compatible API's
+// (Cerebras, OpenRouter, Mistral…) is kept by its address: there may be several
+export type KeyProvider = 'groq' | 'gemini' | 'anthropic' | 'ollama-cloud' | 'openai';
 
 export interface LlmSettings {
   provider: LlmProvider;
@@ -14,7 +16,9 @@ export interface LlmSettings {
   ollamaUrl: string;
 }
 
-export type AiServerKind = 'ollama' | 'groq' | 'gemini' | 'anthropic';
+// An Ollama server and an OpenAI-compatible API are known by their address (`url`; an LlmSettings's `ollamaUrl`), the
+// others by their provider
+export type AiServerKind = 'ollama' | 'groq' | 'gemini' | 'anthropic' | 'ollama-cloud' | 'openai';
 
 // Where the models run, in the order the chat tries them: an Ollama-compatible server (this computer's Ollama, an
 // Orange Pi's RKLLama through an SSH tunnel), known by its address, or Groq's or Gemini's API with its key in the
@@ -58,9 +62,11 @@ export type BackgroundTask = 'summaries' | 'images' | 'drafts';
 // server isn't reached, tried again at retryAt; its model doesn't read images, tried again at retryAt or when the
 // settings change; no server takes it (none with the queue on has a model for it)
 export interface TaskWait {
-  reason: 'answer' | BackgroundTask | 'paused' | 'unreachable' | 'noVision' | 'noServer' | 'limited';
+  reason: 'answer' | BackgroundTask | 'paused' | 'unreachable' | 'noVision' | 'noServer' | 'limited' | 'refused';
   server: string;
   retryAt: number | null;
+  // Refused: what the server said (a wrong key, no credits, a model it hasn't)
+  error?: string;
 }
 
 // A server whose queue takes a task's work, as the task's row on Activity tells it: the one it does now, or why not
@@ -386,6 +392,7 @@ export interface SummaryTryMeeting {
 // A tried summary: its text, and how long it took in how many calls, with the tokens when the provider counts them
 export interface SummaryTry {
   llm: string;
+  server: string;
   local: boolean;
   text: string;
   ms: number;
@@ -423,6 +430,8 @@ export interface DraftView {
   text: string;
   sources: CitedSource[];
   llm: string | null;
+  // The server it's written on, by its name: "orangepi"
+  server: string | null;
   local: boolean;
   error: string | null;
   createdAt: number;
@@ -668,7 +677,8 @@ export interface CitedSource {
 export type AskPart =
   // What the rewrite made of the question, with the filters set by hand applied
   | { kind: 'request', query: string, from?: number, to?: number, person?: string, room?: string, rank?: 'reactions', series?: string }
-  | { kind: 'sources', sources: CitedSource[], leftOut: number, warning?: string, llm: string, local: boolean }
+  // server: where it answers, by its name ("orangepi"); missing in turns saved before it was kept
+  | { kind: 'sources', sources: CitedSource[], leftOut: number, warning?: string, llm: string, local: boolean, server?: string }
   | { kind: 'text', text: string }
   | { kind: 'done' }
   | { kind: 'error', message: string };
@@ -707,7 +717,7 @@ export type ModelTask = 'images' | 'embeddings';
 export interface ModelChoice {
   provider: LlmProvider;
   model: string;
-  // Ollama's: the server it's on
+  // Ollama's and an OpenAI-compatible API's: the server it's on
   ollamaUrl?: string;
   server?: string;
   // Ollama on this computer: it sees every source (F8)
@@ -742,7 +752,7 @@ export interface ShortSummary {
 // A summary arrives in parts, as events
 export type SummaryPart =
   // Calls done of all those needed (more than one for a meeting summarized in parts); all may grow
-  | { kind: 'progress', done: number, all: number, llm: string, local: boolean }
+  | { kind: 'progress', done: number, all: number, llm: string, local: boolean, server?: string }
   | { kind: 'text', text: string }
   | { kind: 'done', summary: ShortSummary }
   | { kind: 'stopped' }
@@ -866,9 +876,12 @@ export interface CoreMethods {
   getSettings: { params: NoParams, result: Settings };
   saveSettings: { params: Settings, result: Settings };
   // Whether each key is in the keyring; read only when asked, as the keyring may be locked right after login (N1)
-  keys: { params: NoParams, result: Record<KeyProvider, boolean> };
-  setKey: { params: { provider: KeyProvider, key: string }, result: null };
-  deleteKey: { params: { provider: KeyProvider }, result: null };
+  // Whether each provider's key is in the keyring: by provider, and an OpenAI-compatible API's by "openai:<address>"
+  // for the addresses given
+  keys: { params: { urls?: string[] }, result: Record<string, boolean> };
+  // An OpenAI-compatible API's key is its address's
+  setKey: { params: { provider: KeyProvider, key: string, url?: string }, result: null };
+  deleteKey: { params: { provider: KeyProvider, url?: string }, result: null };
   // For the main process only: the link that opens a browser's meeting in its extension
   stenogramaLink: { params: { sourceId: number, sessionId: string, startMs: number | null }, result: string };
   // For the main process only: the link to a message in its messenger

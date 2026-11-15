@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import MarkdownText from '@/components/MarkdownText';
 import ModelPicker from '@/components/ModelPicker';
-import { formatDay, formatDuration } from '@/lib/format';
+import { formatDay, formatDuration, modelOnServer } from '@/lib/format';
 import { errorMessage } from '@/lib/kb';
 
 // Trying summary models on a meeting (Settings → Meeting summaries): each try's summary with its time, calls and
@@ -147,7 +147,7 @@ const SummaryTryPanel = ({ defaultLlm }: { defaultLlm: LlmSettings }) => {
       {shown.map((result) => (
         <Result
           key={result.id}
-          title={result.llm.slice(result.llm.indexOf(' ') + 1)}
+          title={modelOnServer(result.llm, result.server)}
           local={result.local}
           meta={stats(result)}
           text={result.text}

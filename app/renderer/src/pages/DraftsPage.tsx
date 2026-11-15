@@ -12,7 +12,7 @@ import RequestDraftDialog from '@/components/RequestDraftDialog';
 import SourceRow from '@/components/SourceRow';
 import { citedNumbers } from '@/lib/citations';
 import { withoutCitations } from '@/lib/drafts';
-import { formatDuration, formatTime, formatWhen, isChatDocument } from '@/lib/format';
+import { formatDuration, formatTime, formatWhen, isChatDocument, modelOnServer } from '@/lib/format';
 import { errorMessage, useAppStatus } from '@/lib/kb';
 
 // Reply drafts (F9, M7) to review: the message to the user with the ones before it, and a draft from what the knowledge
@@ -62,7 +62,7 @@ const DraftState = ({ draft, paused }: { draft: DraftView, paused: AttachmentSta
   return (
     <p className="flex items-center gap-2 text-sm text-muted-foreground">
       <Loader2 className="size-3.5 animate-spin" />
-      Writing{draft.llm && ` with ${draft.llm}`} · {formatDuration(now - draft.updatedAt)}
+      Writing{draft.llm && ` with ${modelOnServer(draft.llm, draft.server)}`} · {formatDuration(now - draft.updatedAt)}
     </p>
   );
 };
@@ -152,7 +152,7 @@ const DraftCard = ({ draft, paused, onOpen }: DraftCardProps) => {
         {draft.state === 'ready' && draft.llm && (
           <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
             {draft.local ? <Monitor className="size-3.5" /> : <Cloud className="size-3.5" />}
-            {draft.llm.slice(draft.llm.indexOf(' ') + 1)}
+            {modelOnServer(draft.llm, draft.server)}
           </span>
         )}
         {error && <span className="text-sm text-destructive">{error}</span>}

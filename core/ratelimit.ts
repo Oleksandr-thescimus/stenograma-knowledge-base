@@ -141,3 +141,31 @@ export const headroomOf = (headers: Headers | undefined, now = Date.now()): Rate
 
   return waits.length ? { until: now + Math.max(...waits), daily: false } : null;
 };
+
+// The server refuses its own work, whatever it's given: a wrong key (401), no credits (402: Ollama Cloud's "Add usage
+// credits"), no access (403), a model it hasn't (404: Ollama's "model not found") or retired (410). Not the meeting's,
+// draft's or image's fault, so they wait for another server; its lane stops (the service's `refused`). What the provider
+// said, cut short, for Activity: its words, not the user's data
+const REFUSALS = new Set([401, 402, 403, 404, 410]);
+
+export const serverRefusalOf = (error: unknown): string | null => {
+  const api = apiErrorOf(error);
+
+  if (!api?.statusCode || !REFUSALS.has(api.statusCode)) {
+    return null;
+  }
+
+  let said: unknown = null;
+
+  try {
+    const body = JSON.parse(api.responseBody ?? '') as { error?: { message?: unknown } | string, message?: unknown };
+    said = typeof body.error === 'string' ? body.error : body.error?.message ?? body.message;
+  } catch {
+    // Not JSON
+  }
+
+  // Ollama's ref, a request's id, says nothing to the user
+  const text = typeof said === 'string' ? said.replace(/\s*\(ref: [^)]*\)/, '').trim() : '';
+
+  return `${api.statusCode}${text ? `: ${text.slice(0, 200)}` : ''}`;
+};

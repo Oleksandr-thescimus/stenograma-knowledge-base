@@ -59,6 +59,7 @@ const REASONS: Record<TaskWait['reason'], string> = {
   noVision: 'has an image model that doesn\'t read images: choose another in Settings → AI models',
   noServer: '',
   limited: 'is at its rate limit',
+  refused: 'refused its work',
 };
 
 const whenText = ({ reason, retryAt }: TaskWait) => {
@@ -78,10 +79,15 @@ export const waitText = (wait: TaskWait) => {
     text = 'no server takes it: turn a queue on, with a model for it, in Settings → AI models';
   } else if (wait.reason === 'noVision') {
     text = `the image model on ${wait.server} doesn't read images: choose another in Settings → AI models`;
+  } else if (wait.reason === 'refused') {
+    text = `${wait.server} ${refusedText(wait)}`;
   }
 
   return `Waiting: ${text}${whenText(wait)}`;
 };
 
+// "refused its work (402: Add usage credits…): check its key, credits and models in Settings → AI models"
+const refusedText = (wait: TaskWait) => `${REASONS.refused}${wait.error ? ` (${wait.error})` : ''}: check its key, credits and models in Settings → AI models`;
+
 // A server's own reason, after its name: "reads an image first", "isn't reached, tried again at 14:05"
-export const serverWaitText = (wait: TaskWait) => `${REASONS[wait.reason]}${whenText(wait)}`;
+export const serverWaitText = (wait: TaskWait) => `${wait.reason === 'refused' ? refusedText(wait) : REASONS[wait.reason]}${whenText(wait)}`;

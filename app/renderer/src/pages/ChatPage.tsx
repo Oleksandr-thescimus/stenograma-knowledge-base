@@ -11,7 +11,7 @@ import SourceRow from '@/components/SourceRow';
 import type { Chats } from '@/lib/chats';
 import { citedNumbers } from '@/lib/citations';
 import { NO_FILTERS, requestChips, toFilters, type FilterFields, type Without } from '@/lib/filters';
-import { isChatDocument } from '@/lib/format';
+import { isChatDocument, modelOnServer } from '@/lib/format';
 import { errorMessage, useAppStatus, useKbEvents } from '@/lib/kb';
 import { answersLlm } from '@/lib/servers';
 
@@ -154,7 +154,7 @@ const TurnView = ({ turn, now, onOpen, askAgain }: TurnViewProps) => {
         {turn.state === 'answering' && !turn.answer && (
           <p className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
-            Answering with {turn.sources?.llm}
+            Answering with {turn.sources && modelOnServer(turn.sources.llm, turn.sources.server)}
             {waited > 10 && ` · ${waited} s`}
             {waited > 10 && turn.sources?.llm.startsWith('groq') && ': Groq\'s free tier may be waiting out its per-minute limit'}
           </p>
@@ -174,7 +174,7 @@ const TurnView = ({ turn, now, onOpen, askAgain }: TurnViewProps) => {
             <span className="flex items-center gap-1">
               Answered by
               {turn.sources.local ? <Monitor className="size-3.5" /> : <Cloud className="size-3.5" />}
-              {turn.sources.llm.slice(turn.sources.llm.indexOf(' ') + 1)}
+              {modelOnServer(turn.sources.llm, turn.sources.server)}
             </span>
             {askAgain && (
               <ModelPicker
@@ -206,7 +206,7 @@ const TurnView = ({ turn, now, onOpen, askAgain }: TurnViewProps) => {
   );
 };
 
-const ChatPage = ({ chats }: { chats: Chats }) => {
+const ChatPage = ({ chats, active }: { chats: Chats, active: boolean }) => {
   const status = useAppStatus();
   const [turns, setTurns] = useState<Turn[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -231,8 +231,9 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
 
   useKbEvents(onEvent);
 
-  // The settings' model, and the models to choose from: listed again after the list closes and when the window comes
-  // back, as models are installed elsewhere. Kept as they were when the same, not to draw the list again
+  // The settings' model, and the models to choose from: listed again after the list closes, when the window comes back,
+  // as models are installed elsewhere, and when the page is shown again, as servers are added in Settings (the page
+  // stays mounted, hidden). Kept as they were when the same, not to draw the list again
   const listModels = useCallback(() => {
     const same = <T, >(next: T) => (current: T) => (JSON.stringify(current) === JSON.stringify(next) ? current : next);
     window.kb.invoke('getSettings', {}).then((settings) => setDefaultLlm(same<LlmSettings | null>(answersLlm(settings.servers)))).catch(() => undefined);
@@ -241,7 +242,7 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
   }, []);
 
   useEffect(() => {
-    if (!coreRunning) {
+    if (!coreRunning || !active) {
       return undefined;
     }
 
@@ -249,7 +250,7 @@ const ChatPage = ({ chats }: { chats: Chats }) => {
     window.addEventListener('focus', listModels);
 
     return () => window.removeEventListener('focus', listModels);
-  }, [coreRunning, listModels]);
+  }, [coreRunning, active, listModels]);
 
   const { chosen, choose, setAnswering, started, refresh } = chats;
 

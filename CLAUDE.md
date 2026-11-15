@@ -70,7 +70,8 @@ Uses yarn (`yarn.lock`).
     the keyring under the knowledge base's id (`tokenSecretName`); the service takes `secrets` and `fetch`, which the
     tests replace (`tests/core/rocketchat-fake.ts`), so they never touch the real keyring or network.
   - `servers.ts`: the AI servers (Ollama's API: this computer's, an Orange Pi's through a tunnel; Groq's and
-    Gemini's and Claude's), in the chat's order, each with its text and image models and its background queue (a lane each,
+    Gemini's and Claude's and Ollama Cloud's; OpenAI-compatible APIs such as Cerebras or OpenRouter, known by their
+    address, their key kept by it), in the chat's order, each with its text and image models and its background queue (a lane each,
     sharing the work), settings older than them made into servers, and whether a server answers.
   - `ratelimit.ts`: a cloud provider's rate limits, from its refusals and its answers' headers, which the queue waits
     out.

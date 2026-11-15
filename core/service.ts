@@ -2,7 +2,7 @@ import { wrapLanguageModel, type LanguageModel } from 'ai';
 import { z } from 'zod';
 import { prepareAnswer, streamAnswer } from './answer/answer.ts';
 import { rewriteQuestion } from './answer/rewrite.ts';
-import { summarizeTranscript, type SummaryCall } from './answer/summary.ts';
+import { EmptyAnswerError, summarizeTranscript, type SummaryCall } from './answer/summary.ts';
 import { BROWSER_KIND, createBrowserSource, renewBrowserToken, updateBrowser } from './browsers.ts';
 import {
   addTurn, chatExists, chatHistory, createChat, deleteChat, finishTurn, getChat, interruptRunningTurns, listChats,
@@ -15,14 +15,14 @@ import {
 import { describeImage, imageMediaType, readDocument } from './chat/read.ts';
 import { formatDay } from './format.ts';
 import { aiCalls, aiErrors, aiUsage, deleteErrors, foldCalls, KEEP_CALLS_MS, recordCall, type AiCall } from './usage.ts';
-import { headroomOf, rateLimitOf, type RateLimit } from './ratelimit.ts';
+import { headroomOf, rateLimitOf, type RateLimit, serverRefusalOf } from './ratelimit.ts';
 import { findRooms, getConversation, getRoom, indexRead, listRooms, roomLabel, roomStats, topReacted } from './chat/store.ts';
 import { createSyncRunner, type SyncRunner } from './connectors/runner.ts';
 import { getKbId, openDb, type Db } from './db.ts';
 import { embeddingModelId, isLocalEmbedding, type EmbeddingProvider } from './embed/provider.ts';
 import { embedPending, keepJobsOf, pendingBySource, pendingEmbeddings, queueModel } from './embed/store.ts';
 import {
-  createConfiguredEmbeddingProvider, createLanguageModel, isLocalLlm, isTimedOut, llmKeyName, MODEL_CALL_TIMEOUT_MS,
+  createConfiguredEmbeddingProvider, createLanguageModel, isLocalLlm, isTimedOut, llmKeyName, MODEL_CALL_TIMEOUT_MS, OLLAMA_CLOUD_API,
 } from './llm.ts';
 import { acquireLock } from './lock.ts';
 import { dataDir, dbPath, ensureDataDir, lockPath } from './paths.ts';
@@ -48,7 +48,7 @@ import { deleteSecret, getSecret, setSecret } from './secrets.ts';
 import { buildServer, stenogramaOpenUrl } from './server.ts';
 import { loadSettings, saveSettings, type StoredSettings } from './settings.ts';
 import {
-  answersLlm, CLOUD_NAMES, createReachability, DOCUMENTS_LANE, imageModel, laneOf, localTextLlm, normalizeUrl, sameUrl, serverId,
+  answersLlm, CLOUD_NAMES, createReachability, DOCUMENTS_LANE, hasAddress, imageModel, keyIdOf, laneOf, localTextLlm, normalizeUrl, sameUrl, serverId,
   serverTakes, textModel, textModels, whereLabel,
 } from './servers.ts';
 import type { ModelRef } from './servers.ts';
@@ -91,12 +91,12 @@ const KEYRING: SecretStore = { get: getSecret, set: setSecret, delete: deleteSec
 const EMBEDDING = z.object({ provider: z.enum(['ollama', 'gemini']), model: z.string().trim().min(1), ollamaUrl: z.url() });
 const AI_SERVER = z.object({
   name: z.string().trim().min(1),
-  kind: z.enum(['ollama', 'groq', 'gemini', 'anthropic']),
+  kind: z.enum(['ollama', 'groq', 'gemini', 'anthropic', 'ollama-cloud', 'openai']),
   url: z.union([z.url(), z.literal('')]),
   text: z.string().trim(),
   images: z.string().trim(),
   queue: z.boolean(),
-}).refine((server) => server.kind !== 'ollama' || server.url, { message: 'An Ollama server needs its address' });
+}).refine((server) => !hasAddress(server.kind) || server.url, { message: 'An Ollama server or OpenAI-compatible API needs its address' });
 const SETTINGS = z.object({
   // Groq and Gemini once each, and no address twice
   servers: z.array(AI_SERVER).min(1).refine((servers) => new Set(servers.map(serverId)).size === servers.length, { message: 'A server is there twice' }),
@@ -184,6 +184,8 @@ const summaryLlm = (llm: LlmSettings, cloudAllowed: boolean, settings: Pick<Stor
 const MAX_READ_ATTEMPTS = 3;
 // While an answer or a summary runs, the files wait this long: they use the same model
 const READ_YIELD_MS = 30_000;
+// A server that refused its work (a wrong key, no credits) is asked again after this, or once its models or key change
+const REFUSED_RETRY_MS = 30 * 60_000;
 // How often the AI servers are asked whether they answer
 const SERVERS_CHECK_MS = 30_000;
 // A vision model that doesn't read images is asked again after this long, if the settings haven't changed
@@ -262,8 +264,8 @@ export const createKbService = (options: ServiceOptions) => {
   });
 
   // A server as the statistics name it
-  const usageServerName = (provider: string, server: string) => (provider === 'ollama'
-    ? whereLabel(loadSettings().servers, { provider: 'ollama', ollamaUrl: server })
+  const usageServerName = (provider: string, server: string) => (hasAddress(provider as LlmSettings['provider'])
+    ? whereLabel(loadSettings().servers, { provider: provider as LlmSettings['provider'], ollamaUrl: server })
     : whereLabel([], { provider: provider as LlmSettings['provider'], ollamaUrl: '' }));
 
   // What a kept call worked on, by its ids, for the list of errors: null when it's gone
@@ -384,7 +386,7 @@ export const createKbService = (options: ServiceOptions) => {
       return model;
     }
 
-    const call = { task, provider: llm.provider, model: llm.model, server: llm.provider === 'ollama' ? normalizeUrl(llm.ollamaUrl) : llm.provider, background, item };
+    const call = { task, provider: llm.provider, model: llm.model, server: laneOf(llm), background, item };
 
     return wrapLanguageModel({
       model: model as LanguageModelV3,
@@ -580,6 +582,12 @@ export const createKbService = (options: ServiceOptions) => {
 
     if (retrying?.reason === 'unreachable') {
       return { reason: 'unreachable', server: server.name, retryAt: retrying.at };
+    }
+
+    const refusal = refusalOn(key, server);
+
+    if (refusal) {
+      return { reason: 'refused', server: server.name, retryAt: refusal.until, error: refusal.error };
     }
 
     const limit = limitOn(key);
@@ -836,7 +844,7 @@ export const createKbService = (options: ServiceOptions) => {
     again: boolean;
     timer: ReturnType<typeof setTimeout> | null;
     // Why it waits for its timer: an answer going on, a model not reached, a cloud provider's rate limit
-    retry: { at: number, reason: 'answer' | 'unreachable' | 'limited' } | null;
+    retry: { at: number, reason: 'answer' | 'unreachable' | 'limited' | 'refused' } | null;
   }
   const lanes = new Map<string, Lane>();
   // A cloud provider's rate limit reached, or about to be (core/ratelimit.ts): its lane waits until then
@@ -845,6 +853,21 @@ export const createKbService = (options: ServiceOptions) => {
     const limit = limited.get(key);
 
     return limit && limit.until > Date.now() ? limit : null;
+  };
+  // A server that refused its work (serverRefusalOf: a wrong key, no credits, a model it hasn't): its lane waits half an
+  // hour, or until its models or its key change, and the work waits for the other servers instead of failing on it
+  const refused = new Map<string, { until: number, error: string, models: string }>();
+  const modelsOf = (server: AiServer) => `${server.text}|${server.images}`;
+  const refusalOn = (key: string, server: AiServer | null | undefined) => {
+    const refusal = refused.get(key);
+
+    if (refusal && (refusal.until <= Date.now() || !server || refusal.models !== modelsOf(server))) {
+      refused.delete(key);
+
+      return null;
+    }
+
+    return refusal ?? null;
   };
   // The lanes of what the user asked for (answers, summaries), by its id
   const askLanes = new Map<string, string>();
@@ -1076,7 +1099,7 @@ export const createKbService = (options: ServiceOptions) => {
     const llm = summaryLlm(lane.llm, sourceCloudAllowed(draft.sourceId), settings);
     const label = `${llm.provider} ${llm.model}`;
     const controller = new AbortController();
-    updateDraft(current, draft.id, { state: 'writing', error: null, model: label });
+    updateDraft(current, draft.id, { state: 'writing', error: null, model: label, server: whereLabel(settings.servers, llm) });
     const startedAt = Date.now();
     runs.set(lane.key, {
       task: 'drafts',
@@ -1136,6 +1159,7 @@ export const createKbService = (options: ServiceOptions) => {
       text: draft.text,
       sources: draft.sources,
       llm: draft.model,
+      server: draft.server,
       local: draft.model?.startsWith('ollama ') ?? false,
       error: draft.error,
       createdAt: draft.createdAt,
@@ -1213,9 +1237,14 @@ export const createKbService = (options: ServiceOptions) => {
 
     lane.retry = null;
     const current = db;
-    const retry = (ms: number, reason: 'answer' | 'unreachable' | 'limited' = 'unreachable') => {
+    const retry = (ms: number, reason: 'answer' | 'unreachable' | 'limited' | 'refused' = 'unreachable') => {
       lane.timer = setTimeout(() => runLane(key), ms);
       lane.retry = { at: Date.now() + ms, reason };
+    };
+    const refuse = (server: AiServer, error: string) => {
+      refused.set(key, { until: Date.now() + REFUSED_RETRY_MS, error, models: modelsOf(server) });
+      log(`${key} refused its work (${error.split(':')[0]}): its queue waits`);
+      retry(REFUSED_RETRY_MS, 'refused');
     };
 
     lane.run = (async () => {
@@ -1251,6 +1280,15 @@ export const createKbService = (options: ServiceOptions) => {
             break;
           }
 
+          // A server that refused its work waits, until its models or its key change
+          const refusal = refusalOn(key, server);
+
+          if (refusal) {
+            retry(refusal.until - Date.now(), 'refused');
+            stopped = true;
+            break;
+          }
+
           const text = server ? textModel(server) : null;
           const images = server ? imageModel(server) : null;
           // F8: a cloud server takes only the work of sources that may go to cloud AI
@@ -1273,6 +1311,7 @@ export const createKbService = (options: ServiceOptions) => {
               const dismissed = getDraft(current, draft.id)?.state !== 'writing';
 
               const rateLimit = rateLimitOf(error);
+              const refusal = serverRefusalOf(error);
 
               if (released.delete(key)) {
                 updateDraft(current, draft.id, { state: 'waiting' });
@@ -1287,6 +1326,13 @@ export const createKbService = (options: ServiceOptions) => {
                 limited.set(key, rateLimit);
                 updateDraft(current, draft.id, { state: 'waiting' });
                 retry(rateLimit.until - Date.now(), 'limited');
+                stopped = true;
+                claims.drafts.delete(draft.id);
+                runBackground();
+              } else if (refusal && server && !dismissed) {
+                // Nor when the server refuses all its work: another server's queue takes it
+                updateDraft(current, draft.id, { state: 'waiting' });
+                refuse(server, refusal);
                 stopped = true;
                 claims.drafts.delete(draft.id);
                 runBackground();
@@ -1338,6 +1384,8 @@ export const createKbService = (options: ServiceOptions) => {
               }
 
               const rateLimit = rateLimitOf(error);
+              // A model that answers nothing would fail every meeting the same way
+              const refusal = serverRefusalOf(error) ?? (error instanceof EmptyAnswerError ? error.message : null);
 
               if (released.delete(key)) {
                 claims.meetings.delete(meeting.id);
@@ -1351,6 +1399,12 @@ export const createKbService = (options: ServiceOptions) => {
                 limited.set(key, rateLimit);
                 log(`${key} is at its rate limit until ${new Date(rateLimit.until).toISOString()}`);
                 retry(rateLimit.until - Date.now(), 'limited');
+                stopped = true;
+                claims.meetings.delete(meeting.id);
+                runBackground();
+              } else if (refusal && server) {
+                // Nor when the server refuses all its work: it waits for another server, not skipped until a restart
+                refuse(server, refusal);
                 stopped = true;
                 claims.meetings.delete(meeting.id);
                 runBackground();
@@ -1411,6 +1465,7 @@ export const createKbService = (options: ServiceOptions) => {
             // The images wait for a model that reads them, the lane's other work goes on: tried again when the settings
             // change, or in a while
             const rateLimit = rateLimitOf(error);
+            const refusal = serverRefusalOf(error);
 
             if (released.delete(key)) {
               attachmentError = null;
@@ -1425,6 +1480,13 @@ export const createKbService = (options: ServiceOptions) => {
               limited.set(key, rateLimit);
               attachmentError = null;
               retry(rateLimit.until - Date.now(), 'limited');
+              stopped = true;
+              claims.files.delete(fileKey);
+              runBackground();
+            } else if (refusal && server) {
+              // Nor when the server refuses all its work
+              attachmentError = null;
+              refuse(server, refusal);
               stopped = true;
               claims.files.delete(fileKey);
               runBackground();
@@ -1520,12 +1582,12 @@ export const createKbService = (options: ServiceOptions) => {
   // A cloud provider answers with its key in the keyring, unless its last call didn't get through. The keyring is read
   // at most every 10 seconds: the status is made several times a second while work goes on
   const keyKnown = new Map<string, { at: number, set: boolean }>();
-  const cloudReachable = (provider: KeyProvider, lane: Lane | undefined) => {
-    const known = keyKnown.get(provider);
-    const set = known && Date.now() - known.at < 10_000 ? known.set : Boolean(secrets.get(llmKeyName(provider)));
-    keyKnown.set(provider, known && Date.now() - known.at < 10_000 ? known : { at: Date.now(), set });
+  const cloudReachable = (keyId: string, lane: Lane | undefined) => {
+    const known = keyKnown.get(keyId);
+    const set = known && Date.now() - known.at < 10_000 ? known.set : Boolean(secrets.get(llmKeyName(keyId)));
+    keyKnown.set(keyId, known && Date.now() - known.at < 10_000 ? known : { at: Date.now(), set });
 
-    return set && !cloudFailures.has(provider) && !(lane?.timer && lane.retry?.reason === 'unreachable');
+    return set && !cloudFailures.has(keyId) && !(lane?.timer && lane.retry?.reason === 'unreachable');
   };
 
   const aiStatus = (settings: StoredSettings): AiStatus => {
@@ -1541,7 +1603,7 @@ export const createKbService = (options: ServiceOptions) => {
           name: server.name,
           id: key,
           kind: server.kind,
-          reachable: server.kind === 'ollama' ? reach.last(server.url) : cloudReachable(server.kind, known),
+          reachable: server.kind === 'ollama' ? reach.last(server.url) : cloudReachable(keyIdOf(server), known),
           queue: server.queue,
           takes: serverTakes(server),
           now: workOn(key),
@@ -1615,12 +1677,12 @@ export const createKbService = (options: ServiceOptions) => {
   // The settings' model first, though its server can't be reached now
   const withConfigured = (choices: ModelChoice[], model: ModelRef, servers: AiServer[]): ModelChoice[] => {
     const same = (choice: ModelChoice) => choice.provider === model.provider && choice.model === model.model
-      && (model.provider !== 'ollama' || sameUrl(choice.ollamaUrl ?? '', model.ollamaUrl));
+      && (!hasAddress(model.provider) || sameUrl(choice.ollamaUrl ?? '', model.ollamaUrl));
     const configured: ModelChoice[] = choices.some(same) ? [] : [{
       provider: model.provider,
       model: model.model,
       local: isLocalLlm(model),
-      ...(model.provider === 'ollama' && { ollamaUrl: model.ollamaUrl, server: whereLabel(servers, model) }),
+      ...(hasAddress(model.provider) && { ollamaUrl: model.ollamaUrl, server: whereLabel(servers, model) }),
     }];
 
     return [...configured, ...choices];
@@ -1631,18 +1693,27 @@ export const createKbService = (options: ServiceOptions) => {
     && !model.capabilities.includes('embedding') && !/rerank/i.test(model.name);
   const serverChatModels = async (url: string) => (await ollamaModels(url)).filter(answersText).map((model) => model.name);
 
-  // Groq's and Gemini's chat models, listed by their APIs with the key in the keyring, for 10 minutes; none without one
-  const cloudLists = new Map<KeyProvider, { at: number, models: ModelChoice[] }>();
+  // The cloud providers' chat models, listed by their APIs with the key in the keyring, for 10 minutes; none without one.
+  // By the key's id (keyIdOf): an OpenAI-compatible API's is its address's
+  const cloudLists = new Map<string, { at: number, names: string[] }>();
   // Why a provider's models couldn't be listed, for Settings
-  const cloudFailures = new Map<KeyProvider, string>();
-  const cloudModels = async (provider: KeyProvider): Promise<ModelChoice[]> => {
-    const cached = cloudLists.get(provider);
+  const cloudFailures = new Map<string, string>();
+  // The models that read images, as last listed, where the provider tells (Ollama Cloud's details, OpenRouter's
+  // modalities); none known means any may
+  const cloudVision = new Map<string, Set<string> | null>();
+  const cloudModels = async (provider: KeyProvider, server?: Pick<AiServer, 'url' | 'name'>): Promise<ModelChoice[]> => {
+    const keyId = keyIdOf({ kind: provider, url: server?.url ?? '' });
+    // An OpenAI-compatible API's are its server's, as named and spelled now
+    const choicesOf = (names: string[]) => names.map((model): ModelChoice => ({
+      provider, model, local: false, ...(provider === 'openai' && server && { ollamaUrl: server.url, server: server.name }),
+    }));
+    const cached = cloudLists.get(keyId);
 
     if (cached && Date.now() - cached.at < 10 * 60_000) {
-      return cached.models;
+      return choicesOf(cached.names);
     }
 
-    const key = secrets.get(llmKeyName(provider));
+    const key = secrets.get(llmKeyName(keyId));
 
     if (!key) {
       return [];
@@ -1656,7 +1727,8 @@ export const createKbService = (options: ServiceOptions) => {
         if (!response.ok) {
           const body = await response.json().catch(() => null) as { error?: { message?: string } | string } | null;
           const said = typeof body?.error === 'string' ? body.error : body?.error?.message;
-          throw new Error(`${CLOUD_NAMES[provider]} answered ${response.status}${said ? `: ${String(said).slice(0, 200)}` : ''}`);
+          const name = provider === 'openai' ? server?.name ?? 'The server' : CLOUD_NAMES[provider];
+          throw new Error(`${name} answered ${response.status}${said ? `: ${String(said).slice(0, 200)}` : ''}`);
         }
 
         return response.json() as Promise<unknown>;
@@ -1673,6 +1745,24 @@ export const createKbService = (options: ServiceOptions) => {
         const response = await fetchImpl('https://api.anthropic.com/v1/models?limit=100', { headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' }, signal });
         const { data } = await answered(response) as { data: { id: string }[] };
         names = data.map((model) => model.id);
+      } else if (provider === 'ollama-cloud') {
+        const headers = { Authorization: `Bearer ${key}` };
+        const response = await fetchImpl(`${OLLAMA_CLOUD_API}/tags`, { headers, signal });
+        const { models: listed } = await answered(response) as { models: { name: string }[] };
+        names = listed.map((model) => model.name).filter((name) => !/embed/i.test(name)).sort();
+        // Which read images, as each model's details say; one not told is taken as text only
+        const shown = await Promise.all(names.map((model) => fetchImpl(`${OLLAMA_CLOUD_API}/show`, {
+          method: 'POST', headers, body: JSON.stringify({ model }), signal,
+        }).then((answer) => (answer.ok ? answer.json() as Promise<{ capabilities?: string[] }> : null), () => null)));
+        cloudVision.set(keyId, new Set(names.filter((_, index) => shown[index]?.capabilities?.includes('vision'))));
+      } else if (provider === 'openai') {
+        const response = await fetchImpl(`${normalizeUrl(server?.url ?? '')}/models`, { headers: { Authorization: `Bearer ${key}` }, signal });
+        const { data } = await answered(response) as { data: { id: string, architecture?: { input_modalities?: string[] } }[] };
+        // Embeddings, speech, moderation and the like don't answer questions
+        const chat = data.filter((model) => !/embed|whisper|tts|guard|rerank|moderation|transcribe|audio/i.test(model.id));
+        names = chat.map((model) => model.id).sort();
+        const told = chat.some((model) => model.architecture?.input_modalities);
+        cloudVision.set(keyId, told ? new Set(chat.filter((model) => model.architecture?.input_modalities?.includes('image')).map((model) => model.id)) : null);
       } else {
         const response = await fetchImpl('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key }, signal });
         const { models } = await answered(response) as { models: { name: string, supportedGenerationMethods?: string[] }[] };
@@ -1680,14 +1770,13 @@ export const createKbService = (options: ServiceOptions) => {
           && !/embedding|image|tts|audio|live/i.test(model.name)).map((model) => model.name.replace(/^models\//, '')).sort();
       }
 
-      const models = names.map((model) => ({ provider, model, local: false }));
-      cloudLists.set(provider, { at: Date.now(), models });
-      cloudFailures.delete(provider);
+      cloudLists.set(keyId, { at: Date.now(), names });
+      cloudFailures.delete(keyId);
 
-      return models;
+      return choicesOf(names);
     } catch (error) {
       log(`listing ${provider}'s models failed: ${messageOf(error)}`);
-      cloudFailures.set(provider, messageOf(error));
+      cloudFailures.set(keyId, messageOf(error));
 
       return [];
     }
@@ -1875,6 +1964,7 @@ export const createKbService = (options: ServiceOptions) => {
         warning: [roomWarning, seriesWarning, providerWarning ?? found.warning].filter(Boolean).join('. ') || undefined,
         llm: `${llm.provider} ${llm.model}`,
         local: isLocalLlm(llm),
+        server: whereLabel(loadSettings().servers, llm),
       };
       send(sourcesPart);
       save((opened) => saveSources(opened, turnId, sourcesPart));
@@ -1947,7 +2037,7 @@ export const createKbService = (options: ServiceOptions) => {
         header: meetingHeader(meeting),
         lines,
         abortSignal: controller.signal,
-        onProgress: (done, all) => send({ kind: 'progress', done, all, llm: label, local: isLocalLlm(llm) }),
+        onProgress: (done, all) => send({ kind: 'progress', done, all, llm: label, local: isLocalLlm(llm), server: whereLabel(loadSettings().servers, llm) }),
         onText: (part) => send({ kind: 'text', text: part }),
         onCall: calls.onCall,
       });
@@ -2286,6 +2376,7 @@ export const createKbService = (options: ServiceOptions) => {
 
         return {
           llm: `${llm.provider} ${llm.model}`,
+          server: whereLabel(loadSettings().servers, llm),
           local: isLocalLlm(llm),
           text,
           ms,
@@ -2345,18 +2436,26 @@ export const createKbService = (options: ServiceOptions) => {
         cloudModels('groq'),
         cloudModels('gemini'),
         cloudModels('anthropic'),
+        cloudModels('ollama-cloud'),
+        ...servers.filter((server) => server.kind === 'openai').map((server) => cloudModels('openai', server)),
       ]);
 
       return withConfigured(models.flat(), llm, servers);
     },
 
-    // A cloud provider's with its key (none without it): every Gemini and Claude model reads images, Groq's none
+    // A cloud provider's with its key (none without it): every Gemini and Claude model reads images, Groq's none,
+    // Ollama Cloud's and an OpenAI-compatible API's those it says, or any when it doesn't
     serverModels: async ({ kind, url }) => {
       if (kind !== 'ollama') {
-        const text = (await cloudModels(kind)).map((model) => model.model);
-        const failure = cloudFailures.get(kind);
+        const keyId = keyIdOf({ kind, url });
+        const name = loadSettings().servers.find((server) => server.kind === kind && sameUrl(server.url, url))?.name ?? normalizeUrl(url);
+        const text = (await cloudModels(kind, { url, name })).map((model) => model.model);
+        const failure = cloudFailures.get(keyId);
+        const vision = cloudVision.get(keyId);
+        const reads = (model: string) => kind !== 'groq' && (!vision || vision.has(model));
+        const images = text.filter(reads);
 
-        return { reachable: text.length > 0, text, images: kind === 'groq' ? [] : text, ...(failure && { error: failure }) };
+        return { reachable: text.length > 0, text, images, ...(failure && { error: failure }) };
       }
 
       try {
@@ -2674,15 +2773,23 @@ export const createKbService = (options: ServiceOptions) => {
       return getSettings();
     },
 
-    keys: () => ({
-      groq: Boolean(getSecret(llmKeyName('groq'))), gemini: Boolean(getSecret(llmKeyName('gemini'))), anthropic: Boolean(getSecret(llmKeyName('anthropic'))),
-    }),
+    keys: ({ urls = [] }) => Object.fromEntries([
+      ...(['groq', 'gemini', 'anthropic', 'ollama-cloud'] as const).map((provider) => keyIdOf({ kind: provider, url: '' })),
+      ...urls.map((url) => keyIdOf({ kind: 'openai', url })),
+    ].map((keyId) => [keyId, Boolean(getSecret(llmKeyName(keyId)))])),
 
-    setKey: ({ provider, key }: { provider: KeyProvider, key: string }) => {
-      setSecret(llmKeyName(provider), key.trim());
+    setKey: ({ provider, key, url = '' }) => {
+      const keyId = keyIdOf({ kind: provider, url });
+
+      if (provider === 'openai' && !URL.canParse(url)) {
+        throw new Error('Type the API\'s address first');
+      }
+
+      setSecret(llmKeyName(keyId), key.trim());
       log(`kept the ${provider} key`);
-      keyKnown.delete(provider);
-      cloudLists.delete(provider);
+      keyKnown.delete(keyId);
+      refused.delete(serverId({ kind: provider, url }));
+      cloudLists.delete(keyId);
       // Gemini embeddings may have waited for it, the provider's queue too
       runEmbedding();
       runBackground();
@@ -2691,11 +2798,13 @@ export const createKbService = (options: ServiceOptions) => {
       return null;
     },
 
-    deleteKey: ({ provider }) => {
-      deleteSecret(llmKeyName(provider));
+    deleteKey: ({ provider, url = '' }) => {
+      const keyId = keyIdOf({ kind: provider, url });
+      deleteSecret(llmKeyName(keyId));
       log(`removed the ${provider} key`);
-      keyKnown.delete(provider);
-      cloudLists.delete(provider);
+      keyKnown.delete(keyId);
+      refused.delete(serverId({ kind: provider, url }));
+      cloudLists.delete(keyId);
       emitStatus();
 
       return null;

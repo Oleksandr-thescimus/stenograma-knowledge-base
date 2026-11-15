@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AiServer } from '../../core/protocol.ts';
 import { DEFAULT_SETTINGS } from '../../core/settings.ts';
 import {
-  answersLlm, createReachability, laneOf, localTextLlm, serverId, serversOf, serverTakes, textModels, whereLabel,
+  answersLlm, createReachability, keyIdOf, laneOf, localTextLlm, serverId, serversOf, serverTakes, textModel, textModels, whereLabel,
 } from '../../core/servers.ts';
 
 // The AI servers: the chat's order, what each takes of the background work, the servers of settings saved before they
@@ -18,6 +18,20 @@ describe('AI servers', () => {
     expect(serverId({ kind: 'groq', url: '' })).toBe(laneOf({ provider: 'groq', ollamaUrl: PI }));
     expect(whereLabel([orangePi, ...DEFAULT_SETTINGS.servers], { provider: 'ollama', ollamaUrl: PI })).toBe('Orange Pi');
     expect(whereLabel(DEFAULT_SETTINGS.servers, { provider: 'gemini', ollamaUrl: '' })).toBe('Gemini');
+  });
+
+  it('knows an OpenAI-compatible API by its address, its key too, and never as this computer', () => {
+    const cerebras: AiServer = { name: 'Cerebras', kind: 'openai', url: 'https://api.cerebras.ai/v1/', text: 'gpt-oss-120b', images: '', queue: true };
+    const openRouter: AiServer = { ...cerebras, name: 'OpenRouter', url: 'https://openrouter.ai/api/v1' };
+    const model = textModel(cerebras)!;
+
+    expect(model).toEqual({ provider: 'openai', model: 'gpt-oss-120b', ollamaUrl: 'https://api.cerebras.ai/v1/' });
+    expect(serverId(cerebras)).toBe('https://api.cerebras.ai/v1');
+    expect(laneOf(model)).toBe(serverId(cerebras));
+    expect(keyIdOf(cerebras)).toBe('openai:https://api.cerebras.ai/v1');
+    expect(keyIdOf({ kind: 'groq', url: '' })).toBe('groq');
+    expect(whereLabel([openRouter, cerebras], model)).toBe('Cerebras');
+    expect(localTextLlm({ servers: [cerebras] })).toMatchObject({ provider: 'ollama' });
   });
 
   it('answers with the first server\'s text model; what may not go to the cloud with the first on this computer', () => {
@@ -48,6 +62,7 @@ describe('AI servers', () => {
       { name: 'Groq', kind: 'groq', url: '', text: '', images: '', queue: false },
       { name: 'Gemini', kind: 'gemini', url: '', text: '', images: '', queue: false },
       { name: 'Claude', kind: 'anthropic', url: '', text: '', images: '', queue: false },
+      { name: 'Ollama Cloud', kind: 'ollama-cloud', url: '', text: '', images: '', queue: false },
     ]);
     // As saved now, with Groq and Gemini always there
     expect(serversOf({ servers: [orangePi] })).toEqual([orangePi, ...DEFAULT_SETTINGS.servers.filter((server) => server.kind !== 'ollama')]);

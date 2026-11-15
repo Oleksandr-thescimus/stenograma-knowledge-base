@@ -191,7 +191,7 @@ describe('the core service', () => {
     const { parts } = await askParts(service, 'a1', { question: 'Що з бюджетом?' });
 
     expect(parts[0]).toEqual({ kind: 'request', query: 'бюджет' });
-    expect(parts[1]).toMatchObject({ kind: 'sources', leftOut: 0, llm: 'ollama qwen3.5:9b', local: true });
+    expect(parts[1]).toMatchObject({ kind: 'sources', leftOut: 0, llm: 'ollama qwen3.5:9b', local: true, server: 'This computer' });
     expect((parts[1] as Extract<AskPart, { kind: 'sources' }>).sources.length).toBeGreaterThan(0);
     expect(parts.filter((part) => part.kind === 'text').map((part) => part.text).join('')).toBe('Бюджет затвердили [1].');
     expect(parts.at(-1)).toEqual({ kind: 'done' });
@@ -299,7 +299,7 @@ describe('the core service', () => {
     const { service, sourceId } = await startWithMeetings();
     const parts = await summaryParts(service, 's1', sourceId);
 
-    expect(parts[0]).toEqual({ kind: 'progress', done: 0, all: 1, llm: 'ollama qwen3.5:9b', local: true });
+    expect(parts[0]).toEqual({ kind: 'progress', done: 0, all: 1, llm: 'ollama qwen3.5:9b', local: true, server: 'This computer' });
     expect(parts.filter((part) => part.kind === 'text').map((part) => part.text).join('')).toBe('Бюджет затвердили [1].');
     expect(parts.at(-1)).toMatchObject({ kind: 'done', summary: { text: 'Бюджет затвердили [1].', model: 'ollama qwen3.5:9b', stale: false } });
     expect(await service.invoke('meeting', { sourceId, sessionId: MEETING })).toMatchObject({
@@ -553,6 +553,8 @@ describe('the core service', () => {
         { conversation: '#general', reason: 'mention', state: 'ready', text: 'Так, бюджет погодили [1].' },
       ]);
     expect(drafts.find((draft) => draft.reason === 'mention')!.messages.map((message) => message.text)).toEqual(['Всім привіт', '@olena бюджет погодили?']);
+    // Written where: its model and server, as shown
+    expect(drafts[0]).toMatchObject({ llm: 'ollama qwen3.5:9b', server: 'This computer' });
 
     // Answered in Rocket.Chat: gone after the next sync
     server.post('general', 'm4', 'Так, погодили', { author: { username: USER.username, name: USER.name } });
@@ -855,6 +857,7 @@ describe('the core service', () => {
         { name: 'Groq', takes: [] },
         { name: 'Gemini', takes: [] },
         { name: 'Claude', kind: 'anthropic', reachable: false, takes: [] },
+        { name: 'Ollama Cloud', kind: 'ollama-cloud', reachable: false, takes: [] },
       ],
       answers: { server: 'This computer', model: 'qwen3.5:9b' },
     });
@@ -882,6 +885,93 @@ describe('the core service', () => {
     expect(asked!.get('x-api-key')).toBe('sk-ant-test');
     expect(asked!.get('anthropic-version')).toBe('2023-06-01');
     expect((await service.invoke('chatModels', {})).filter((model) => model.provider === 'anthropic').map((model) => model.model)).toEqual(models);
+  });
+
+  it('lists Ollama Cloud\'s models with its key as a bearer token, those that read images as their details say', async () => {
+    const asked: string[] = [];
+    const service = makeService({
+      fetch: async (input, init) => {
+        const url = String(input);
+
+        if (url.startsWith('https://ollama.com/api/')) {
+          asked.push(`${url} ${new Headers(init?.headers).get('authorization')}`);
+
+          if (url.endsWith('/tags')) {
+            return Response.json({ models: [{ name: 'qwen3-vl:235b' }, { name: 'gpt-oss:120b' }, { name: 'embeddinggemma' }] });
+          }
+
+          const { model } = JSON.parse(String(init?.body)) as { model: string };
+
+          return Response.json({ capabilities: model.includes('vl') ? ['completion', 'vision'] : ['completion'] });
+        }
+
+        throw new TypeError('fetch failed');
+      },
+      secrets: { get: (name) => (name === 'llm:ollama-cloud' ? 'oc-test' : undefined), set: () => undefined, delete: () => undefined },
+    });
+    await service.start();
+
+    expect(await service.invoke('serverModels', { kind: 'ollama-cloud', url: '' })).toEqual({
+      reachable: true, text: ['gpt-oss:120b', 'qwen3-vl:235b'], images: ['qwen3-vl:235b'],
+    });
+    expect(asked[0]).toBe('https://ollama.com/api/tags Bearer oc-test');
+    expect((await service.invoke('chatModels', {})).filter((model) => model.provider === 'ollama-cloud'))
+      .toEqual([expect.objectContaining({ model: 'gpt-oss:120b', local: false }), expect.objectContaining({ model: 'qwen3-vl:235b', local: false })]);
+  });
+
+  it('lists an OpenAI-compatible API\'s models with the key of its address, those that read images when it says', async () => {
+    const CEREBRAS = 'https://api.cerebras.ai/v1';
+    const OPENROUTER = 'https://openrouter.ai/api/v1';
+    const asked: string[] = [];
+    const kept = new Map([['llm:openai:https://api.cerebras.ai/v1', 'csk-test'], ['llm:openai:https://openrouter.ai/api/v1', 'or-test']]);
+    const service = makeService({
+      fetch: async (input, init) => {
+        const url = String(input);
+        asked.push(`${url} ${new Headers(init?.headers).get('authorization')}`);
+
+        if (url === `${CEREBRAS}/models`) {
+          return Response.json({ object: 'list', data: [{ id: 'qwen-3-235b' }, { id: 'gpt-oss-120b' }] });
+        }
+
+        if (url === `${OPENROUTER}/models`) {
+          return Response.json({ data: [
+            { id: 'qwen/qwen3-vl:free', architecture: { input_modalities: ['text', 'image'] } },
+            { id: 'deepseek/deepseek-r1:free', architecture: { input_modalities: ['text'] } },
+            { id: 'openai/text-embedding-3-small', architecture: { input_modalities: ['text'] } },
+          ] });
+        }
+
+        throw new TypeError('fetch failed');
+      },
+      secrets: { get: (name) => kept.get(name), set: () => undefined, delete: () => undefined },
+    });
+    saveSettings({
+      ...DEFAULT_SETTINGS,
+      server: { port },
+      servers: [
+        ...DEFAULT_SETTINGS.servers,
+        { name: 'Cerebras', kind: 'openai', url: CEREBRAS, text: 'gpt-oss-120b', images: '', queue: false },
+        { name: 'OpenRouter', kind: 'openai', url: `${OPENROUTER}/`, text: '', images: '', queue: false },
+      ],
+    });
+    await service.start();
+
+    // It says nothing of images: any may
+    expect(await service.invoke('serverModels', { kind: 'openai', url: CEREBRAS })).toEqual({
+      reachable: true, text: ['gpt-oss-120b', 'qwen-3-235b'], images: ['gpt-oss-120b', 'qwen-3-235b'],
+    });
+    expect(asked).toContain(`${CEREBRAS}/models Bearer csk-test`);
+    expect(await service.invoke('serverModels', { kind: 'openai', url: OPENROUTER })).toEqual({
+      reachable: true, text: ['deepseek/deepseek-r1:free', 'qwen/qwen3-vl:free'], images: ['qwen/qwen3-vl:free'],
+    });
+    expect((await service.invoke('chatModels', {})).filter((model) => model.provider === 'openai')).toEqual([
+      { provider: 'openai', model: 'gpt-oss-120b', ollamaUrl: CEREBRAS, server: 'Cerebras', local: false },
+      { provider: 'openai', model: 'qwen-3-235b', ollamaUrl: CEREBRAS, server: 'Cerebras', local: false },
+      { provider: 'openai', model: 'deepseek/deepseek-r1:free', ollamaUrl: `${OPENROUTER}/`, server: 'OpenRouter', local: false },
+      { provider: 'openai', model: 'qwen/qwen3-vl:free', ollamaUrl: `${OPENROUTER}/`, server: 'OpenRouter', local: false },
+    ]);
+    // A cloud server: its lane is its address's, and it isn't this computer
+    expect((await service.invoke('status', {})).ai.lanes.find((lane) => lane.name === 'Cerebras')).toMatchObject({ id: CEREBRAS, kind: 'openai', reachable: true });
   });
 
   it('says what a cloud provider answered when it refuses to list its models', async () => {
@@ -940,6 +1030,55 @@ describe('the core service', () => {
     expect(ai.lanes[0].limited!.until).toBeGreaterThan(Date.now() + 30_000);
     // The meeting waits, not skipped until a restart
     expect(summaries).toMatchObject({ pending: 1, skipped: 0, waiting: { reason: 'limited', server: 'This computer' } });
+  });
+
+  it('stops a server that refuses all its work (no credits) instead of skipping the meetings, until its models change', async () => {
+    saveSettings({ ...DEFAULT_SETTINGS, server: { port }, summaries: { auto: true, months: 0 } });
+    let calls = 0;
+    // As Ollama Cloud refuses an account without credits
+    model = new MockLanguageModelV3({
+      doStream: async () => {
+        calls += 1;
+
+        throw Object.assign(new Error('Payment Required'), {
+          statusCode: 402,
+          responseBody: JSON.stringify({ error: 'Add usage credits or subscribe: https://ollama.com/plans (ref: 8f0c-11)' }),
+        });
+      },
+    });
+    const { service } = await startWithMeetings();
+    await service.invoke('saveMeetingSeries', { name: 'Weekly planning', matchers: [{ code: 'abc-defg-hij' }] });
+
+    await vi.waitFor(async () => expect((await service.invoke('status', {})).summaries.servers[0].wait).toMatchObject({ reason: 'refused' }), { timeout: 4000 });
+    const { summaries } = await service.invoke('status', {});
+    // The meeting waits for another server, not skipped until a restart; the provider's words without its ref
+    expect(summaries).toMatchObject({ pending: 1, skipped: 0 });
+    expect(summaries.servers[0].wait).toMatchObject({ server: 'This computer', error: '402: Add usage credits or subscribe: https://ollama.com/plans' });
+    expect(summaries.servers[0].wait!.retryAt).toBeGreaterThan(Date.now() + (25 * 60_000));
+    expect(calls).toBe(1);
+
+    // Another model: asked again at once
+    const settings = loadSettings();
+    await service.invoke('saveSettings', { ...settings, servers: settings.servers.map((server, index) => (index === 0 ? { ...server, text: 'qwen3.5:4b' } : server)) });
+    await vi.waitFor(() => expect(calls).toBe(2), { timeout: 4000 });
+  });
+
+  it('stops a server whose model answers nothing (all its output was thinking) instead of skipping the meetings', async () => {
+    saveSettings({ ...DEFAULT_SETTINGS, server: { port }, summaries: { auto: true, months: 0 } });
+    model = new MockLanguageModelV3({
+      doStream: async () => ({
+        stream: simulateReadableStream({
+          chunks: [{ type: 'stream-start', warnings: [] }, { type: 'finish', finishReason: { unified: 'length', raw: 'length' }, usage: USAGE }],
+        }),
+      }),
+    });
+    const { service } = await startWithMeetings();
+    await service.invoke('saveMeetingSeries', { name: 'Weekly planning', matchers: [{ code: 'abc-defg-hij' }] });
+
+    await vi.waitFor(async () => expect((await service.invoke('status', {})).summaries.servers[0].wait).toMatchObject({ reason: 'refused' }), { timeout: 4000 });
+    const { summaries } = await service.invoke('status', {});
+    expect(summaries).toMatchObject({ pending: 1, skipped: 0 });
+    expect(summaries.servers[0].wait).toMatchObject({ error: 'The model gave no summary' });
   });
 
   it('shares the background summaries between the servers with their queue on, each meeting once', async () => {

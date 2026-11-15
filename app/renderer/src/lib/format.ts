@@ -51,3 +51,11 @@ export const formatDuration = (ms: number) => {
 
   return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60} min` : ''}`;
 };
+
+// A model as the core labels it ("ollama qwen3.5:4b") with its server: "qwen3.5:4b on orangepi". Without a server
+// (kept before it was), the model alone
+export const modelOnServer = (llm: string, server?: string | null) => {
+  const model = llm.slice(llm.indexOf(' ') + 1);
+
+  return server ? `${model} on ${server}` : model;
+};

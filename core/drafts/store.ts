@@ -17,6 +17,8 @@ export interface DraftRow {
   text: string;
   sources: CitedSource[];
   model: string | null;
+  // The server it was written on, by its name then: "orangepi", "This computer"
+  server: string | null;
   error: string | null;
   // Asked for by the user: written while the background work is paused too
   asked: boolean;
@@ -28,7 +30,7 @@ export const OPEN_STATES: DraftState[] = ['waiting', 'writing', 'ready', 'failed
 const OPEN = `(${OPEN_STATES.map((state) => `'${state}'`).join(', ')})`;
 
 const COLUMNS = `id, source_id as sourceId, room_id as roomId, thread_id as threadId, message_id as messageId, reason, state, text,
-  sources, model, error, asked, created_at as createdAt, updated_at as updatedAt`;
+  sources, model, server, error, asked, created_at as createdAt, updated_at as updatedAt`;
 
 type StoredRow = Omit<DraftRow, 'sources' | 'asked'> & { sources: string, asked: number };
 
@@ -114,12 +116,13 @@ export interface DraftPatch {
   text?: string;
   sources?: CitedSource[];
   model?: string | null;
+  server?: string | null;
   error?: string | null;
 }
 
 export const updateDraft = (db: Db, id: number, patch: DraftPatch, now = Date.now()) => {
   const fields = Object.entries(patch).filter(([, value]) => value !== undefined);
-  const column = (key: string) => ({ state: 'state', asked: 'asked', text: 'text', sources: 'sources', model: 'model', error: 'error' })[key]!;
+  const column = (key: string) => ({ state: 'state', asked: 'asked', text: 'text', sources: 'sources', model: 'model', server: 'server', error: 'error' })[key]!;
   const value = (key: string, given: unknown) => {
     if (key === 'sources') {
       return JSON.stringify(given);

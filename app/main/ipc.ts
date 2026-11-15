@@ -13,10 +13,10 @@ const BROWSER = z.enum(['chrome', 'firefox', 'edge', 'brave', 'opera', 'other'])
 const EMBEDDING = z.object({ provider: z.enum(['ollama', 'gemini']), model: z.string().min(1).max(200), ollamaUrl: z.url().max(500) }).strict();
 // A cloud model has no Ollama address
 const LLM = z.object({
-  provider: z.enum(['groq', 'gemini', 'anthropic', 'ollama']), model: z.string().min(1).max(200), ollamaUrl: z.union([z.url().max(500), z.literal('')]),
+  provider: z.enum(['groq', 'gemini', 'anthropic', 'ollama-cloud', 'openai', 'ollama']), model: z.string().min(1).max(200), ollamaUrl: z.union([z.url().max(500), z.literal('')]),
 }).strict();
-const KEY_PROVIDER = z.enum(['groq', 'gemini', 'anthropic']);
-const SERVER_KIND = z.enum(['ollama', 'groq', 'gemini', 'anthropic']);
+const KEY_PROVIDER = z.enum(['groq', 'gemini', 'anthropic', 'ollama-cloud', 'openai']);
+const SERVER_KIND = z.enum(['ollama', 'groq', 'gemini', 'anthropic', 'ollama-cloud', 'openai']);
 const AI_SERVER = z.object({
   name: z.string().trim().min(1).max(100),
   kind: SERVER_KIND,
@@ -92,7 +92,7 @@ export const PARAMS: { [M in keyof AppMethods]: z.ZodType<AppMethods[M]['params'
   attachmentImage: z.object(FILE).strict(),
   recentImages: NO_PARAMS,
   // Groq reads no images
-  tryImageModel: z.object({ ...FILE, model: LLM.extend({ provider: z.enum(['ollama', 'gemini', 'anthropic']) }).strict() }).strict(),
+  tryImageModel: z.object({ ...FILE, model: LLM.extend({ provider: z.enum(['ollama', 'gemini', 'anthropic', 'ollama-cloud', 'openai']) }).strict() }).strict(),
   summaryTryMeetings: NO_PARAMS,
   trySummary: MEETING.extend({ tryId: z.string().min(1).max(100), llm: LLM }).strict(),
   taskModels: z.object({ task: z.enum(['images', 'embeddings']) }).strict(),
@@ -139,9 +139,10 @@ export const PARAMS: { [M in keyof AppMethods]: z.ZodType<AppMethods[M]['params'
     server: z.object({ port: z.number().int().min(1024).max(65535) }).strict(),
     app: z.object({ startAtLogin: z.boolean() }).strict(),
   }).strict(),
-  keys: NO_PARAMS,
-  setKey: z.object({ provider: KEY_PROVIDER, key: z.string().trim().min(1).max(500) }).strict(),
-  deleteKey: z.object({ provider: KEY_PROVIDER }).strict(),
+  // An OpenAI-compatible API's key is its address's
+  keys: z.object({ urls: z.array(z.url().max(500)).max(50).optional() }).strict(),
+  setKey: z.object({ provider: KEY_PROVIDER, key: z.string().trim().min(1).max(500), url: z.url().max(500).optional() }).strict(),
+  deleteKey: z.object({ provider: KEY_PROVIDER, url: z.url().max(500).optional() }).strict(),
   openInStenograma: MEETING.extend({ startMs: MS.nullable() }).strict(),
   openInChat: z.object({ documentId: DOCUMENT_ID, messageId: z.string().min(1).max(200) }).strict(),
   restartCore: NO_PARAMS,

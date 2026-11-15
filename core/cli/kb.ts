@@ -21,7 +21,8 @@ import { createRocketChatApi } from '../rocketchat/api.ts';
 import { readConfig, ROCKETCHAT_KIND, syncRocketChat, tokenSecretName } from '../rocketchat/sync.ts';
 import { deleteSecret, getSecret, setSecret } from '../secrets.ts';
 import { loadSettings } from '../settings.ts';
-import { answersLlm } from '../servers.ts';
+import { answersLlm, keyIdOf } from '../servers.ts';
+import type { KeyProvider } from '../protocol.ts';
 import { findOrCreateOnlySource, listSources, markSynced, removeSource, setCloudAllowed } from '../sources.ts';
 import { bundlesFromBackup, readBackup } from '../stenograma/backup.ts';
 import { ingestBundles, reconcileSessions } from '../stenograma/ingest.ts';
@@ -35,7 +36,8 @@ const USAGE = `Usage: yarn kb <command>
   search <query>       Hybrid search. --source <kind>, --from/--to <YYYY-MM-DD>, --person <name>, --limit <n>
   ask <question>       An answer with citations, by the LLM of settings.json. Dates and a person are taken from the
                        question; --source, --from, --to and --person set them instead
-  key set|delete <groq|gemini|anthropic>
+  key set|delete <groq|gemini|anthropic|ollama-cloud>
+  key set|delete openai <the API's address>   an OpenAI-compatible API's (Cerebras, OpenRouter…)
                        Keep an LLM key in the keyring (typed without echo), or remove it
   eval                 Recall@10 and MRR on the golden set (--golden <path>, default ${goldenSetPath()})
   serve                The API for the extension on 127.0.0.1 (the port in settings.json), embedding what it pushes
@@ -290,14 +292,17 @@ const commands: Record<string, () => Promise<void>> = {
   }),
 
   key: async () => {
-    const [action, provider] = args;
+    const [action, provider, url = ''] = args;
 
-    if (!['set', 'delete'].includes(action) || !['groq', 'gemini', 'anthropic'].includes(provider)) {
-      throw new Error('Usage: yarn kb key set|delete <groq|gemini|anthropic>');
+    if (!['set', 'delete'].includes(action) || !['groq', 'gemini', 'anthropic', 'ollama-cloud', 'openai'].includes(provider)
+      || (provider === 'openai' && !URL.canParse(url))) {
+      throw new Error('Usage: yarn kb key set|delete <groq|gemini|anthropic|ollama-cloud>, or yarn kb key set|delete openai <the API\'s address>');
     }
 
+    const keyId = keyIdOf({ kind: provider as KeyProvider, url });
+
     if (action === 'delete') {
-      deleteSecret(llmKeyName(provider));
+      deleteSecret(llmKeyName(keyId));
       console.log(`Removed the ${provider} key`);
 
       return;
@@ -309,7 +314,7 @@ const commands: Record<string, () => Promise<void>> = {
       throw new Error('No key given');
     }
 
-    setSecret(llmKeyName(provider), key);
+    setSecret(llmKeyName(keyId), key);
     console.log(`Kept the ${provider} key. To answer with it, set "llm" in ${settingsPath()}`);
   },
 
