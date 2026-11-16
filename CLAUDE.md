@@ -60,8 +60,8 @@ Uses yarn (`yarn.lock`).
     as `> ` lines), `attachments.ts` (the files whose content is read, kept next to the database, never in the global
     data directory, so a test's never touch the real ones) and `read.ts` (an image by a vision model, a PDF with
     `unpdf`). The service reads them in a queue, after answers.
-  - `drafts/`: reply drafts (F9, M7; Rocket.Chat's first): `detect.ts` (which messages are to the user and still
-    unanswered, after each sync), `store.ts` (the `drafts` table), `style.ts` (the user's style: their replies to
+  - `drafts/`: reply drafts (F9, M7; Rocket.Chat's first): `detect.ts` (which messages are to the user, or in a room chosen for
+    every message, and still unanswered, after each sync), `store.ts` (the `drafts` table), `style.ts` (the user's style: their replies to
     similar messages, the drafts they rewrote, a description of how they write) and `write.ts` (the conversation, the
     search's sources and the style as the prompt). The service writes them first in its background queue; nothing is sent.
   - `rocketchat/`: the REST API with its rate limits (`api.ts`), its rooms and messages as `chat/` keeps them

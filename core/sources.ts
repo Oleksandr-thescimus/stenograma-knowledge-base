@@ -62,8 +62,9 @@ export interface SourceStatus extends Source {
   firstMeetingAt: number | null;
   summarized: number;
   inSeries: number;
-  // A messenger's: whether new messages to the user get a reply draft
+  // A messenger's: whether new messages to the user get a reply draft, and in how many rooms every message does
   repliesEnabled: boolean;
+  draftRooms: number;
 }
 
 // A meeting's document id is stenograma:<source>:<session> (meetingDocumentId)
@@ -80,6 +81,7 @@ export const listSources = (db: Db): SourceStatus[] => {
   return (db.prepare(`
     select s.id, s.kind, s.account, s.config, s.cloud_allowed as cloudAllowed, s.last_sync_at as lastSyncAt, s.last_error as lastError,
       s.last_seen_at as lastSeenAt, s.replies_enabled as repliesEnabled,
+      (select count(*) from chat_rooms r where r.source_id = s.id and r.drafts_all_since is not null) as draftRooms,
       (select count(*) from documents d where d.source_id = s.id) as documents,
       (select count(*) from documents d where d.source_id = s.id and d.kind = 'meeting') as meetings,
       (select count(*) from chunks c join documents d on d.id = c.document_id where d.source_id = s.id) as chunks,

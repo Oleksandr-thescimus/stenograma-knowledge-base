@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { CircleAlert, Info, KeyRound, List, ListChecks, Loader2, MoreHorizontal, Pencil, RefreshCw, Trash2 } from 'lucide-react';
 import { cn } from 'cn';
 import type { SourceInfo } from '../../../../core/protocol';
+import DraftRoomsDialog from '@/components/DraftRoomsDialog';
 import { SourceIcon } from '@/components/SourceIcon';
 import { Button } from '@/components/ui/button';
 import {
@@ -127,6 +128,7 @@ interface SourceCardProps {
 
 const SourceCard = ({ source, nameOf, onAction }: SourceCardProps) => {
   const [error, setError] = useState<string | null>(null);
+  const [choosingRooms, setChoosingRooms] = useState(false);
   const state = stateOf(source);
   const { connector } = source;
   const failed = Boolean(connector && source.lastError && !connector.running);
@@ -250,9 +252,20 @@ const SourceCard = ({ source, nameOf, onAction }: SourceCardProps) => {
           <span className={source.repliesEnabled ? '' : 'text-muted-foreground'}>Draft replies</span>
           <Hint
             label="What gets a draft"
-            text={`Direct messages, mentions of you and replies in your threads get a reply draft after each sync, in Reply drafts, from the rooms it reads. Turned on, the unread ones of the last day get one too. ${
-              source.cloudAllowed ? '' : 'Only Ollama on this computer writes them, as the chats may not go to cloud AI. '}Nothing is sent: you copy a draft into Rocket.Chat.`}
+            text={`Direct messages, mentions of you and replies in your threads get a reply draft after each sync, in Reply drafts, from the rooms it reads, and every message in the rooms chosen below. Turned on, the unread ones of the last day get one too. ${
+              source.cloudAllowed ? '' : 'Only your own Ollama servers write them, as the chats may not go to cloud AI. '}Nothing is sent: you copy a draft into Rocket.Chat.`}
           />
+        </div>
+      )}
+      {source.kind === 'rocketchat' && source.repliesEnabled && (
+        <div className="mt-1 flex items-center gap-2 pl-[5.25rem] text-sm text-muted-foreground">
+          <span>
+            Every message in
+            {' '}
+            {source.draftRooms ? `${source.draftRooms} ${source.draftRooms === 1 ? 'room' : 'rooms'}` : 'no room'}
+          </span>
+          <Button size="sm" variant="ghost" className="h-7 px-2" onClick={() => setChoosingRooms(true)}>Choose…</Button>
+          <DraftRoomsDialog sourceId={source.id} open={choosingRooms} onClose={() => setChoosingRooms(false)} />
         </div>
       )}
     </div>

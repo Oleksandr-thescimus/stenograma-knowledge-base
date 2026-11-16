@@ -321,6 +321,10 @@ const MIGRATIONS: (string | ((db: Db) => void))[] = [
   `
   alter table drafts add column server text;
   `,
+  // A room whose every message from others gets a reply draft, not only those to the user: since when (null: off)
+  `
+  alter table chat_rooms add column drafts_all_since integer;
+  `,
 ];
 
 // sqlite-vec's path points inside app.asar in a packaged app, which SQLite's dlopen can't read (M0)

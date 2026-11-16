@@ -96,6 +96,33 @@ describe('reply drafts', () => {
     expect(found()).toEqual([['m3', 'direct']]);
   });
 
+  it('in a room chosen for it, drafts every message from others once its conversation is quiet, and its unread from before', () => {
+    const chosen = (since: number) => db.prepare('update chat_rooms set drafts_all_since = ? where source_id = ? and room_id = ?').run(since, sourceId, 'general');
+    post('general', 'Старе, прочитане', 50);
+    post('general', 'Хтось знає, де логи?', 20);
+    setRoomReadAt(db, sourceId, 'general', NOW - (40 * MINUTE));
+    // Not chosen: others' talk
+    expect(found()).toEqual([]);
+
+    // Chosen 30 minutes ago: the read one from before doesn't count, the unread does
+    chosen(NOW - (30 * MINUTE));
+    expect(found()).toEqual([['m2', 'room']]);
+
+    // A burst: the conversation isn't quiet yet, so it waits, and says when to look again
+    post('general', 'Бо прод лежить', 1);
+    const quietAt: number[] = [];
+    expect(detectDrafts(db, { ...setup, sourceId, onQuietAt: (at) => quietAt.push(at) })).toBe(0);
+    expect(quietAt).toEqual([NOW + MINUTE]);
+
+    // Quiet now: one draft, for the burst's last message
+    expect(detectDrafts(db, { ...setup, sourceId, now: NOW + (2 * MINUTE) })).toBe(1);
+    expect(listOpenDrafts(db).map((draft) => [draft.messageId, draft.reason])).toEqual([['m3', 'room']]);
+
+    // A mention there is drafted at once, as anywhere
+    post('general', '@olena ти глянеш?', 0, { mentions: [ME] });
+    expect(found()).toEqual([['m4', 'mention']]);
+  });
+
   it('adds a draft once, supersedes it by a later message, and closes it when the user answers', () => {
     post('dm', 'Скинь звіт', 30);
     expect(detectDrafts(db, { ...setup, sourceId })).toBe(1);

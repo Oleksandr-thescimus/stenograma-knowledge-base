@@ -23,6 +23,7 @@ const REASONS: Record<DraftView['reason'], string> = {
   direct: 'direct message',
   mention: 'mentions you',
   thread: 'in your thread',
+  room: 'in a room you follow',
   manual: 'asked for by hand',
 };
 

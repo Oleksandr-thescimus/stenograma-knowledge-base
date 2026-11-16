@@ -8,9 +8,15 @@ import { addDraft, OPEN_STATES } from './store.ts';
 // last of each conversation (a thread, or a room's main line). The messages from before drafts were turned on count
 // only while unread, those of the last days set (a day by default); later ones count once they're kept, read or not,
 // as the user may read a message before its draft is written. None older than the days set (3) gets one, as when the
-// app was off: it's answered or forgotten by then
+// app was off: it's answered or forgotten by then.
+//
+// In a room chosen for it, every message from someone else gets one too (reason room), once its conversation has been
+// quiet 2 minutes: a lively room's burst gets one draft, for its last message, instead of one rewritten after each.
+// Those from before the room was chosen count only while unread, as when drafts are turned on
 
 const DAY = 86_400_000;
+// A room's conversation is answered once it's this quiet
+export const QUIET_MS = 2 * 60_000;
 
 export interface DraftsSetup {
   sourceId: number;
@@ -22,6 +28,8 @@ export interface DraftsSetup {
   unreadDays: number;
   maxAgeDays: number;
   now?: number;
+  // When a room's conversation, not quiet yet, will be: to look again then
+  onQuietAt?: (at: number) => void;
 }
 
 interface Candidate {
@@ -54,10 +62,10 @@ const answered = (db: Db, sourceId: number, username: string, message: ChatMessa
 export const findAddressed = (db: Db, { sourceId, username, since, unreadDays, maxAgeDays, now = Date.now() }: DraftsSetup): Candidate[] => {
   const from = Math.max(since - (unreadDays * DAY), now - (maxAgeDays * DAY));
   const rows = db.prepare(`
-    select m.json, r.type, r.read_at as readAt from chat_messages m
+    select m.json, r.type, r.read_at as readAt, r.drafts_all_since as allSince from chat_messages m
     join chat_rooms r on r.source_id = m.source_id and r.room_id = m.room_id
     where m.source_id = ? and m.ts >= ? order by m.ts
-  `).all(sourceId, from) as { json: string, type: ChatRoomType, readAt: number | null }[];
+  `).all(sourceId, from) as { json: string, type: ChatRoomType, readAt: number | null, allSince: number | null }[];
 
   // The threads the user started or wrote in
   const mine = db.prepare('select message_id as id, thread_id as threadId from chat_messages where source_id = ? and json_extract(json, \'$.username\') = ?')
@@ -65,25 +73,38 @@ export const findAddressed = (db: Db, { sourceId, username, since, unreadDays, m
   const ownThreads = new Set(mine.flatMap(({ id, threadId }) => (threadId ? [id, threadId] : [id])));
   const latest = new Map<string, Candidate>();
 
-  for (const { json, type, readAt } of rows) {
-    const [message] = parse([{ json }]);
+  const unread = (message: ChatMessage, readAt: number | null) => readAt === null || message.ts > readAt;
 
-    if (message.username === username || (message.ts < since && readAt !== null && message.ts <= readAt)) {
+  for (const { json, type, readAt, allSince } of rows) {
+    const [message] = parse([{ json }]);
+    const conversation = `${message.roomId}\n${message.threadId ?? ''}`;
+
+    if (message.username === username) {
       continue;
     }
 
     let reason: DraftReason | null = null;
 
-    if (type === 'direct') {
-      reason = 'direct';
-    } else if (mentionsUser(message, username)) {
-      reason = 'mention';
-    } else if (message.threadId && ownThreads.has(message.threadId)) {
-      reason = 'thread';
+    if (message.ts >= since || unread(message, readAt)) {
+      if (type === 'direct') {
+        reason = 'direct';
+      } else if (mentionsUser(message, username)) {
+        reason = 'mention';
+      } else if (message.threadId && ownThreads.has(message.threadId)) {
+        reason = 'thread';
+      }
+    }
+
+    // A room chosen for every message: one from before it was, and from before the days set, only while unread
+    if (!reason && allSince !== null && (message.ts >= allSince || (message.ts >= allSince - (unreadDays * DAY) && unread(message, readAt)))) {
+      reason = 'room';
     }
 
     if (reason) {
-      latest.set(`${message.roomId}\n${message.threadId ?? ''}`, { message, reason });
+      latest.set(conversation, { message, reason });
+    } else if (latest.get(conversation)?.reason === 'room') {
+      // A later message that doesn't count, from before the room was chosen and read: the earlier one is answered too
+      latest.delete(conversation);
     }
   }
 
@@ -126,6 +147,13 @@ export const detectDrafts = (db: Db, setup: DraftsSetup) => db.transaction(() =>
   closeAnswered(db, setup.sourceId, setup.username, now);
 
   return findAddressed(db, { ...setup, now }).filter(({ message, reason }) => {
+    // A room's conversation waits until it's quiet: looked at again then
+    if (reason === 'room' && now - message.ts < QUIET_MS) {
+      setup.onQuietAt?.(message.ts + QUIET_MS);
+
+      return false;
+    }
+
     // A conversation whose draft answers a later message already keeps it
     const later = db.prepare(`
       select 1 from drafts d join chat_messages m on m.source_id = d.source_id and m.message_id = d.message_id

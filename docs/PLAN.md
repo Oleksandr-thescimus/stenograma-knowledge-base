@@ -552,6 +552,14 @@ on the release") and draft replies to new emails and messages.
   all thinking and came back empty ("The model gave no summary"). OpenAI-compatible APIs and Ollama Cloud now get
   Claude's 16000 too (`withRoomToThink`, `core/llm.ts`). An empty answer (`EmptyAnswerError`), notes included, stops
   that server's summaries like a refusal instead of skipping meeting after meeting.
+- **Reply drafts to every message in chosen rooms** (2026-11-15): besides the messages to the user (direct, mention,
+  their thread), a messenger source's card has "Every message in N rooms · Choose…", rooms it reads but direct
+  messages. There every message from someone else gets a draft (reason `room`), once its conversation has been quiet
+  2 minutes (`QUIET_MS`, a timer looks again then), so a burst gets one draft for its last message instead of one
+  rewritten after each on the Orange Pi; a message to the user there is drafted at once, as anywhere. Messages from
+  before a room was chosen count only while unread, as when drafts are turned on; a room no longer chosen dismisses
+  its waiting drafts. Chosen in the source's settings rather than on the drafts page, where a room with no draft yet
+  has nothing to click.
 
 ## Why Electron, with a core of its own
 
@@ -806,7 +814,8 @@ without approval, a people directory that joins one person's names across source
     transcripts.
   - `stenograma_rows`: the rows a browser pushed (source, table, key, JSON), so the core can index them again when the
     rules of F1 change, without a push, and another browser's copy of a session can take over.
-  - `chat_rooms` (a messenger's rooms read, with their cursors, members and when the user last read them) and `chat_messages` (each message as the
+  - `chat_rooms` (a messenger's rooms read, with their cursors, members, when the user last read them, and since when
+    every message there gets a reply draft, `drafts_all_since`, 2026-11-15) and `chat_messages` (each message as the
     chunker reads it: author, text, quotes, files, its thread), so a room is indexed again without a sync. A room's day
     is a document (`chat`), a thread another (`chat-thread`), and a file's text a third (`chat-file`).
   - `chat_attachments`: a message's image or document whose content is read, with its state (pending, done, failed,

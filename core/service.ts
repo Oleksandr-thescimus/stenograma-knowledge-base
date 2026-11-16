@@ -27,7 +27,7 @@ import {
 import { acquireLock } from './lock.ts';
 import { dataDir, dbPath, ensureDataDir, lockPath } from './paths.ts';
 import type {
-  AiCallResult, AiServer, AiStatus, AiTask, AskPart, BackgroundTask, LaneActivity, TaskServer, TaskWait, WorkNow, ChatTurn, CitedSource, CoreEvent, CoreMethods, CoreStatus, DraftView, EmbeddingSettings, KeyProvider,
+  AiCallResult, AiServer, AiStatus, AiTask, AskPart, BackgroundTask, LaneActivity, TaskServer, TaskWait, WorkNow, ChatTurn, CitedSource, CoreEvent, CoreMethods, CoreStatus, DraftRoom, DraftView, EmbeddingSettings, KeyProvider,
   LlmSettings, ModelChoice, RewriteFilter, RocketChatAccess, SearchFilters, ServerStatus, Settings, SummaryPart, SummaryStatus, SyncLimits,
 } from './protocol.ts';
 import { createRocketChatApi, FileTooLargeError, normalizeServerUrl } from './rocketchat/api.ts';
@@ -1169,6 +1169,31 @@ export const createKbService = (options: ServiceOptions) => {
     };
   };
 
+  // A source to look at again when a room's conversation will be quiet (detect.ts's QUIET_MS)
+  const quietTimers = new Map<number, { at: number, timer: ReturnType<typeof setTimeout> }>();
+  const lookAgainAt = (sourceId: number, at: number) => {
+    const known = quietTimers.get(sourceId);
+
+    if (known && known.at <= at) {
+      return;
+    }
+
+    if (known) {
+      clearTimeout(known.timer);
+    }
+
+    quietTimers.set(sourceId, {
+      at,
+      timer: setTimeout(() => {
+        quietTimers.delete(sourceId);
+
+        if (!stopping && db) {
+          findDrafts(sourceId);
+        }
+      }, Math.max(0, at - Date.now()) + 1000),
+    });
+  };
+
   // After a messenger's sync: the drafts answered there close, and new messages to the user get theirs
   const findDrafts = (sourceId: number) => {
     const current = openedDb();
@@ -1180,7 +1205,7 @@ export const createKbService = (options: ServiceOptions) => {
 
     const config = readConfig(current, sourceId);
     const added = detectDrafts(current, {
-      sourceId, username: config.username, since: config.draftsSince ?? Date.now(), ...loadSettings().drafts,
+      sourceId, username: config.username, since: config.draftsSince ?? Date.now(), ...loadSettings().drafts, onQuietAt: (at) => lookAgainAt(sourceId, at),
     });
 
     if (added) {
@@ -2585,6 +2610,41 @@ export const createKbService = (options: ServiceOptions) => {
       return messageLink(readConfig(current, doc.sourceId), room, messageId);
     },
 
+    draftRooms: ({ sourceId }) => (openedDb().prepare(`
+      select room_id as roomId, title, type, drafts_all_since is not null as "all" from chat_rooms
+      where source_id = ? and type <> 'direct' order by title collate nocase
+    `).all(sourceId) as (Omit<DraftRoom, 'all'> & { all: number })[]).map((room) => ({ ...room, all: Boolean(room.all) })),
+
+    // A room newly chosen counts from now (and its unread messages of the last days); one no longer, its drafts waiting
+    // for that reason are dismissed
+    setDraftRooms: ({ sourceId, roomIds }) => {
+      const current = openedDb();
+      const chosen = new Set(roomIds);
+      const now = Date.now();
+      const rooms = current.prepare('select room_id as roomId, drafts_all_since as since from chat_rooms where source_id = ? and type <> \'direct\'')
+        .all(sourceId) as { roomId: string, since: number | null }[];
+      const set = current.prepare('update chat_rooms set drafts_all_since = ? where source_id = ? and room_id = ?');
+      const dismiss = current.prepare(`
+        update drafts set state = 'dismissed', updated_at = ? where source_id = ? and room_id = ? and reason = 'room' and state in ('waiting', 'failed')
+      `);
+
+      current.transaction(() => {
+        for (const { roomId, since } of rooms) {
+          if (chosen.has(roomId) && since === null) {
+            set.run(now, sourceId, roomId);
+          } else if (!chosen.has(roomId) && since !== null) {
+            set.run(null, sourceId, roomId);
+            dismiss.run(now, sourceId, roomId);
+          }
+        }
+      })();
+      log(`source ${sourceId}: drafts to every message in ${chosen.size} rooms`);
+      findDrafts(sourceId);
+      emitStatus();
+
+      return null;
+    },
+
     setRepliesEnabled: ({ sourceId, enabled }) => {
       const current = openedDb();
       const config = rocketChatConfig(sourceId);
@@ -2878,6 +2938,7 @@ export const createKbService = (options: ServiceOptions) => {
       stopController.abort();
       asks.forEach((controller) => controller.abort());
       summaries.forEach((controller) => controller.abort());
+      quietTimers.forEach(({ timer }) => clearTimeout(timer));
 
       if (embedRetry) {
         clearTimeout(embedRetry);

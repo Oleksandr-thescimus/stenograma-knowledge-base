@@ -160,8 +160,9 @@ export interface SourceInfo {
   inSeries: number;
   // Its chunks waiting for the embedding model
   embeddingsPending: number;
-  // A messenger's: whether new messages to the user get a reply draft (F9)
+  // A messenger's: whether new messages to the user get a reply draft (F9), and in how many rooms every message does
   repliesEnabled: boolean;
+  draftRooms: number;
   // A connector's source (Rocket.Chat): what it reads, and its sync; null for the others
   connector: ConnectorInfo | null;
 }
@@ -363,7 +364,16 @@ export interface DraftStatus {
 }
 
 // Why a message got a draft: a direct message, a mention by name, or a reply in a thread the user wrote in
-export type DraftReason = 'direct' | 'mention' | 'thread' | 'manual';
+// room: any message in a room chosen for drafts to every message
+export interface DraftRoom {
+  roomId: string;
+  title: string;
+  type: ChatRoomType;
+  // Every message from others there gets a draft
+  all: boolean;
+}
+
+export type DraftReason = 'direct' | 'mention' | 'thread' | 'room' | 'manual';
 
 export type DraftState = 'waiting' | 'writing' | 'ready' | 'failed';
 
@@ -853,6 +863,9 @@ export interface CoreMethods {
   setCloudAllowed: { params: { sourceId: number, allowed: boolean }, result: null };
   // A messenger's new messages to the user get reply drafts from then on, with its unread ones of the last day
   setRepliesEnabled: { params: { sourceId: number, enabled: boolean }, result: null };
+  // The rooms a messenger source keeps, but direct messages (they all get drafts), and whether every message there does
+  draftRooms: { params: { sourceId: number }, result: DraftRoom[] };
+  setDraftRooms: { params: { sourceId: number, roomIds: string[] }, result: null };
   // The drafts to review or being written, the newest first
   drafts: { params: NoParams, result: DraftView[] };
   // Dismissed: gone from the list. Written again: back in the queue, first

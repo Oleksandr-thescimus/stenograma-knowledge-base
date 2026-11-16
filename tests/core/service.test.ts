@@ -556,6 +556,13 @@ describe('the core service', () => {
     // Written where: its model and server, as shown
     expect(drafts[0]).toMatchObject({ llm: 'ollama qwen3.5:9b', server: 'This computer' });
 
+    // Rooms for drafts to every message: the source's rooms but direct messages
+    expect((await service.invoke('draftRooms', { sourceId })).map(({ title, all }) => [title, all])).toEqual([['general', false]]);
+    await service.invoke('setDraftRooms', { sourceId, roomIds: ['general'] });
+    expect(await service.invoke('draftRooms', { sourceId })).toMatchObject([{ title: 'general', type: 'channel', all: true }]);
+    expect((await service.invoke('status', {})).sources.find((source) => source.id === sourceId)).toMatchObject({ draftRooms: 1 });
+    await service.invoke('setDraftRooms', { sourceId, roomIds: [] });
+
     // Answered in Rocket.Chat: gone after the next sync
     server.post('general', 'm4', 'Так, погодили', { author: { username: USER.username, name: USER.name } });
     await service.invoke('syncSource', { sourceId });

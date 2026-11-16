@@ -120,6 +120,8 @@ export const PARAMS: { [M in keyof AppMethods]: z.ZodType<AppMethods[M]['params'
   deleteMeetingSeries: z.object({ id: ID }).strict(),
   setCloudAllowed: z.object({ sourceId: ID, allowed: z.boolean() }).strict(),
   setRepliesEnabled: z.object({ sourceId: ID, enabled: z.boolean() }).strict(),
+  draftRooms: z.object({ sourceId: ID }).strict(),
+  setDraftRooms: z.object({ sourceId: ID, roomIds: z.array(z.string().min(1).max(200)).max(2000) }).strict(),
   drafts: NO_PARAMS,
   draftAction: z.object({ draftId: ID, action: z.enum(['dismiss', 'rewrite']) }).strict(),
   openDraftInChat: z.object({ draftId: ID }).strict(),
