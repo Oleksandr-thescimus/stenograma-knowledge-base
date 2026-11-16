@@ -424,8 +424,8 @@ on the release") and draft replies to new emails and messages.
     again"; `drafts.asked`) is written while paused too, as an answer in the chat is; a paused one says so. A draft closes when the user writes in its conversation
     after its message, in Rocket.Chat or anywhere it syncs from.
   - A draft is the conversation up to the message (a thread's first message and last replies, or the room's last 20 of
-    two days) and the knowledge base's search for the messages to the user since they last wrote, its own chunks left
-    out; at most 6 sources, cited as [n]. F8 as summaries: Ollama writes it when the chats may not go to cloud AI, in an
+    two days), with what was read of its images (2026-11-16's decision below), and the knowledge base's search for the
+    messages to the user since they last wrote, its own chunks left out; at most 6 sources, cited as [n]. F8 as summaries: Ollama writes it when the chats may not go to cloud AI, in an
     8192-token context.
   - "Reply drafts" in the sidebar, with the count to review: each draft with its messages, the text to edit, its
     sources, "Copy" (without the [n] marks), "Open in Rocket.Chat", "Write again" and "Dismiss". A notification says
@@ -560,6 +560,13 @@ on the release") and draft replies to new emails and messages.
   before a room was chosen count only while unread, as when drafts are turned on; a room no longer chosen dismisses
   its waiting drafts. Chosen in the source's settings rather than on the drafts page, where a room with no draft yet
   has nothing to click.
+- **A draft knows what an image shows** (2026-11-16): the model got only an image's file name, so a draft to a
+  screenshot answered nothing in it. The conversation now gives what the vision model read of each image ("[image …,
+  described by AI: … Text in it: …]", up to 1500 characters of its text), and the search for sources takes it with the
+  messages' text, as an image sent without a word is all there is. A draft whose messages to the user have an image not
+  read yet waits for it: a lane that can read it reads it first, another takes other work, and the draft goes on once
+  it's read. It doesn't wait when no server's queue may read it now (no vision model, F8, a rate limit, a refusal),
+  after the image's first failed attempt, or 5 minutes after the draft was made (`DRAFT_IMAGE_WAIT_MS`).
 
 ## Why Electron, with a core of its own
 

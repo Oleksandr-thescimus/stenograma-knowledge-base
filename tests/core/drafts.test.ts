@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { noneAffected, saveMessages, saveRoom, setRoomReadAt } from '../../core/chat/store.ts';
+import { registerAttachments, saveRead } from '../../core/chat/attachments.ts';
+import { imagesOf, noneAffected, saveMessages, saveRoom, setRoomReadAt } from '../../core/chat/store.ts';
 import type { ChatMessage } from '../../core/chat/types.ts';
 import { detectDrafts, findAddressed, latestFromOthers, mentionsUser } from '../../core/drafts/detect.ts';
 import { getDraft, listOpenDrafts, requestDraft, updateDraft } from '../../core/drafts/store.ts';
 import { corrections, draftOutcomes, formatStyle, replyExamples, styleSample } from '../../core/drafts/style.ts';
-import { askedText, conversationOf, prepareDraft } from '../../core/drafts/write.ts';
+import { askedText, conversationOf, prepareDraft, unreadImages } from '../../core/drafts/write.ts';
 import type { SearchHit } from '../../core/search.ts';
 import { DEFAULT_SETTINGS, type LlmSettings } from '../../core/settings.ts';
 import { answersLlm } from '../../core/servers.ts';
@@ -266,6 +267,27 @@ describe('reply drafts', () => {
       // The meeting's source doesn't allow cloud AI
       db.prepare('insert into sources (id, kind, account, cloud_allowed, created_at) values (99, \'stenograma-browser\', \'Chrome\', 0, 0)').run();
       expect(prepareDraft(db, GROQ, draft, messages, ME, [meeting]).sources).toEqual([]);
+    });
+
+    it('gives an image as what AI read of it, searches by it, and waits for one not read yet', () => {
+      const image = { id: 'f1', name: 'screen.png', type: 'image/png', path: '/file-upload/f1/screen.png' };
+      const asked = post('dm', '', 10, { files: ['screen.png'], attachments: [image] });
+      registerAttachments(db, sourceId, asked);
+      const draft = { sourceId, roomId: 'dm', threadId: null, messageId: asked.id };
+      const messages = conversationOf(db, draft);
+
+      expect(unreadImages(db, sourceId, messages, ME, 0).map((file) => file.fileId)).toEqual(['f1']);
+      // Files sent before the period read aren't waited for
+      expect(unreadImages(db, sourceId, messages, ME, NOW)).toEqual([]);
+      expect(prepareDraft(db, DEFAULT_LLM, draft, messages, ME, []).prompt).toContain('[files: screen.png]');
+
+      saveRead(db, sourceId, 'f1', { state: 'done', description: 'Скріншот помилки', text: 'Error 500' });
+
+      expect(unreadImages(db, sourceId, messages, ME, 0)).toEqual([]);
+      expect(askedText(messages, ME, imagesOf(db, sourceId, messages))).toBe('Скріншот помилки\nError 500');
+      const { prompt } = prepareDraft(db, DEFAULT_LLM, draft, messages, ME, []);
+      expect(prompt).toContain('[image screen.png, described by AI: Скріншот помилки Text in it: Error 500]');
+      expect(prompt).not.toContain('[files:');
     });
 
     it('is copied without its citation marks', () => {

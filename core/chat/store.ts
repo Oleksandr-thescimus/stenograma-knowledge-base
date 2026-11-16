@@ -236,7 +236,7 @@ const participantsOf = (messages: ChatMessage[], room: RoomRow, reactionsOf: (me
 ])];
 
 // What a vision model read of the messages' images, for their lines
-const imagesOf = (db: Db, sourceId: number, messages: ChatMessage[]) => {
+export const imagesOf = (db: Db, sourceId: number, messages: ChatMessage[]) => {
   const files = attachmentsOf(db, sourceId, messages.map((message) => message.id));
 
   return (message: ChatMessage): ImageNote[] => (files.get(message.id) ?? [])

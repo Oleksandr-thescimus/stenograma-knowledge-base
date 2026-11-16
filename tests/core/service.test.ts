@@ -582,6 +582,56 @@ describe('the core service', () => {
     await vi.waitFor(async () => expect((await service.invoke('drafts', {})).map(({ reason, state }) => [reason, state])).toEqual([['manual', 'ready']]));
   });
 
+  it('reads the images of the messages a draft answers before writing it, and gives the model what they show', async () => {
+    // The vision model is busy with an older image when the new one comes
+    let release = () => {};
+    const busy = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reading = false;
+    model = new MockLanguageModelV3({
+      doGenerate: async ({ prompt }) => {
+        if (JSON.stringify(prompt).includes('This image was sent') && !reading) {
+          reading = true;
+          await busy;
+        }
+
+        return { content: [{ type: 'text', text: 'TEXT: Error 500 at /api/orders\nDESCRIPTION: Скріншот помилки сервера' }], finishReason: FINISH, usage: USAGE, warnings: [] };
+      },
+    });
+    saveSettings({ ...DEFAULT_SETTINGS, server: { port }, attachments: { ...DEFAULT_SETTINGS.attachments, months: 0 } });
+    const PNG = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const server = createFakeRocketChat({ start: Date.now() - 3_600_000 });
+    server.addRoom('general', 'c', 'general');
+    server.addRoom('dm-andrii', 'd', 'andrii', 'Andrii Melnyk');
+    server.upload('general', 'm0', 'Старий скріншот', { id: 'f0', name: 'old.png', type: 'image/png', bytes: PNG });
+    const secrets = new Map<string, string>();
+    const service = makeService({
+      fetch: server.fetch,
+      secrets: { get: (name) => secrets.get(name), set: (name, value) => secrets.set(name, value), delete: (name) => secrets.delete(name) },
+    });
+    await service.start();
+    const { sourceId } = await service.invoke('addRocketChat', {
+      serverUrl: SERVER, userId: USER._id, token: TOKEN, selection: { mode: 'chosen', ids: ['general', 'dm-andrii'] }, since: 0, limits: FAST,
+    });
+    await service.invoke('setRepliesEnabled', { sourceId, enabled: true });
+    await vi.waitFor(() => expect(reading).toBe(true), { timeout: 5000 });
+
+    // An image with no words comes: its draft, found in the same sync, waits for it
+    server.upload('dm-andrii', 'm1', '', { id: 'f1', name: 'screen.png', type: 'image/png', bytes: PNG });
+    await service.invoke('syncSource', { sourceId });
+    await vi.waitFor(async () => expect((await service.invoke('status', {})).drafts).toMatchObject({ waiting: 1 }), { timeout: 5000 });
+    release();
+    await vi.waitFor(async () => expect((await service.invoke('status', {})).drafts).toMatchObject({ ready: 1, waiting: 0 }), { timeout: 5000 });
+
+    // The image read before the draft, whose prompt has what it shows in place of its name
+    const prompts = model.doGenerateCalls.map((call) => JSON.stringify(call.prompt));
+    const draftCall = prompts.findIndex((prompt) => prompt.includes('Draft the user'));
+    expect(prompts.filter((prompt, index) => index < draftCall && prompt.includes('This image was sent'))).toHaveLength(2);
+    expect(prompts[draftCall]).toContain('[image screen.png, described by AI: Скріншот помилки сервера Text in it: Error 500 at /api/orders]');
+    expect(prompts[draftCall]).not.toContain('[files: screen.png]');
+  });
+
   it('writes while the background work is paused only the drafts the user asked for, and keeps the pause out of the settings form', async () => {
     model = mockModel('Скину ввечері.', []);
     const server = createFakeRocketChat({ start: Date.now() - 3_600_000 });

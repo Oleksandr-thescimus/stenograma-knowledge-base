@@ -1,5 +1,7 @@
 import { generateText, type LanguageModel } from 'ai';
-import { getRoom, roomLabel, roomMembers } from '../chat/store.ts';
+import { attachmentsOf } from '../chat/attachments.ts';
+import type { ImageNote } from '../chat/chunk.ts';
+import { getRoom, imagesOf, roomLabel, roomMembers } from '../chat/store.ts';
 import type { ChatMessage } from '../chat/types.ts';
 import type { Db } from '../db.ts';
 import { formatDay } from '../format.ts';
@@ -35,7 +37,8 @@ or none, punctuation, emoji); they are never a source of facts.
 - Answer what was asked of the user. Take facts (decisions, dates, numbers, who does what) only from the conversation \
 and the numbered sources, and cite a source after what comes from it as [n], e.g. [2]: the user checks these and \
 removes the marks.
-- Captions of meetings are automatic: words may be misheard. Sources marked "made by AI" are summaries.
+- Captions of meetings are automatic: words may be misheard. Sources marked "made by AI" are summaries. An image sent \
+in the conversation is given as what AI read of it ("[image …, described by AI: …]"): answer about what it shows.
 - When neither the conversation nor the sources say what's needed, don't make it up: reply briefly that you'll find out, \
 or ask what's needed.
 - Only the reply itself: no "Draft:", no explanations, no quotes around it.`;
@@ -86,20 +89,42 @@ export const conversationLabel = (db: Db, draft: Pick<DraftRow, 'sourceId' | 'ro
   return `${room ? roomLabel(room) : 'a room no longer synced'}${draft.threadId ? ' › thread' : ''}`;
 };
 
-const formatMessage = (message: ChatMessage, username: string) => {
+type ImagesOf = (message: ChatMessage) => ImageNote[];
+
+const NO_IMAGES: ImagesOf = () => [];
+
+// What a vision model read of an image: what it shows and its text, in place of the file's name
+const imageNote = (image: ImageNote) => `[image ${image.name}, described by AI: ${image.description?.replace(/\s+/g, ' ').trim() ?? ''}${
+  image.text ? ` Text in it: ${image.text.replace(/\s+/g, ' ').trim().slice(0, MAX_MESSAGE_CHARS)}` : ''}]`;
+
+const formatMessage = (message: ChatMessage, username: string, images: ImageNote[]) => {
   const quotes = (message.quotes ?? []).map((quote) => `> ${quote.author}: ${quote.text.replace(/\s+/g, ' ').slice(0, 300)}\n`).join('');
-  const files = message.files?.length ? ` [files: ${message.files.join(', ')}]` : '';
+  const described = new Set(images.map((image) => image.name));
+  const names = (message.files ?? []).filter((name) => !described.has(name));
+  const files = [names.length ? `[files: ${names.join(', ')}]` : '', ...images.map(imageNote)].filter(Boolean).map((part) => ` ${part}`).join('');
 
   return `${quotes}${message.author}${message.username === username ? ' (the user)' : ''}, ${formatDay(message.ts)} ${time(message.ts)}: ${
     message.text.slice(0, MAX_MESSAGE_CHARS)}${files}`;
 };
 
-// What to search for: the others' messages since the user last wrote, the last few
-export const askedText = (messages: ChatMessage[], username: string) => {
+// The messages a draft answers: the others' since the user last wrote, the last few
+export const askedMessages = (messages: ChatMessage[], username: string) => {
   const lastMine = messages.findLastIndex((message) => message.username === username);
 
-  return messages.slice(lastMine + 1).filter((message) => message.username !== username).slice(-ASKED_MESSAGES)
-    .map((message) => message.text).join('\n');
+  return messages.slice(lastMine + 1).filter((message) => message.username !== username).slice(-ASKED_MESSAGES);
+};
+
+// What to search for: those messages, with what was read of their images (an image sent without a word is all there is)
+export const askedText = (messages: ChatMessage[], username: string, images: ImagesOf = NO_IMAGES) => askedMessages(messages, username)
+  .map((message) => [message.text, ...images(message).map((image) => [image.description, image.text].filter(Boolean).join('\n'))]
+    .filter((part) => part.trim()).join('\n'))
+  .filter(Boolean).join('\n');
+
+// The images of the messages a draft answers not read yet: the draft waits for them, so it knows what they show
+export const unreadImages = (db: Db, sourceId: number, messages: ChatMessage[], username: string, since: number) => {
+  const files = attachmentsOf(db, sourceId, askedMessages(messages, username).map((message) => message.id));
+
+  return [...files.values()].flat().filter((file) => file.kind === 'image' && file.state === 'pending' && file.attempts === 0 && file.ts >= since);
 };
 
 // How the user writes: their description, edited in Settings, and their replies and corrected drafts as the prompt has
@@ -131,7 +156,9 @@ export const prepareDraft = (
   const start = messages[0]?.ts ?? 0;
   const own = (hit: SearchHit) => hit.sourceId === draft.sourceId && hit.threadId === draft.roomId && hit.createdAt >= start - 86_400_000;
   const allowed = hits.filter((hit) => !own(hit) && (isLocalLlm(settings) || cloudAllowed.has(hit.sourceId)));
-  const conversation = `Conversation in ${conversationLabel(db, draft)}:\n\n${messages.map((message) => formatMessage(message, username)).join('\n')}`;
+  const images = imagesOf(db, draft.sourceId, messages);
+  const conversation = `Conversation in ${conversationLabel(db, draft)}:\n\n${
+    messages.map((message) => formatMessage(message, username, images(message))).join('\n')}`;
   const budget = settings.provider === 'ollama' ? OLLAMA_CONTEXT_TOKENS - MAX_DRAFT_TOKENS : INPUT_TOKEN_BUDGET[settings.provider];
   const system = draftSystem(style);
   const sourcesBudget = budget === undefined

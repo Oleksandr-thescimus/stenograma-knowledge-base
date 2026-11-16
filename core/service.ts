@@ -16,7 +16,7 @@ import { describeImage, imageMediaType, readDocument } from './chat/read.ts';
 import { formatDay } from './format.ts';
 import { aiCalls, aiErrors, aiUsage, deleteErrors, foldCalls, KEEP_CALLS_MS, recordCall, type AiCall } from './usage.ts';
 import { headroomOf, rateLimitOf, type RateLimit, serverRefusalOf } from './ratelimit.ts';
-import { findRooms, getConversation, getRoom, indexRead, listRooms, roomLabel, roomStats, topReacted } from './chat/store.ts';
+import { findRooms, getConversation, getRoom, imagesOf, indexRead, listRooms, roomLabel, roomStats, topReacted } from './chat/store.ts';
 import { createSyncRunner, type SyncRunner } from './connectors/runner.ts';
 import { getKbId, openDb, type Db } from './db.ts';
 import { embeddingModelId, isLocalEmbedding, type EmbeddingProvider } from './embed/provider.ts';
@@ -43,7 +43,7 @@ import {
   draftCounts, getDraft, listOpenDrafts, nextWaitingDraft, requestDraft, requeueWriting, updateDraft, waitingAhead, type DraftRow,
 } from './drafts/store.ts';
 import { corrections, countReplies, describeStyle, draftOutcomes, formatStyle, replyExamples, styleSample } from './drafts/style.ts';
-import { askedText, conversationLabel, conversationOf, prepareDraft, toDraftMessages, writeDraft } from './drafts/write.ts';
+import { askedText, conversationLabel, conversationOf, prepareDraft, toDraftMessages, unreadImages, writeDraft } from './drafts/write.ts';
 import { deleteSecret, getSecret, setSecret } from './secrets.ts';
 import { buildServer, stenogramaOpenUrl } from './server.ts';
 import { loadSettings, saveSettings, type StoredSettings } from './settings.ts';
@@ -190,6 +190,8 @@ const REFUSED_RETRY_MS = 30 * 60_000;
 const SERVERS_CHECK_MS = 30_000;
 // A vision model that doesn't read images is asked again after this long, if the settings haven't changed
 const NO_VISION_RETRY_MS = 10 * 60_000;
+// A reply draft waits for the images of the messages it answers to be read at most this long after it was made
+const DRAFT_IMAGE_WAIT_MS = 5 * 60_000;
 
 // A pause of reading images, while it lasts
 const activePause = (settings: StoredSettings) => (settings.backgroundPaused && (settings.backgroundPaused.until === null || settings.backgroundPaused.until > Date.now())
@@ -1118,7 +1120,7 @@ export const createKbService = (options: ServiceOptions) => {
         // Found by words only
       }
 
-      const query = askedText(messages, username) || messages.at(-1)!.text;
+      const query = askedText(messages, username, imagesOf(current, draft.sourceId, messages)) || messages.at(-1)!.text;
       const { hits } = await search(current, query, { provider, limit: 20 });
       const examples = replyExamples(current, draft.sourceId, username, messages.at(-1)!, messages[0].ts);
       const fixes = corrections(current, draft.sourceId);
@@ -1235,6 +1237,30 @@ export const createKbService = (options: ServiceOptions) => {
 
   const backgroundLanes = (settings: StoredSettings) => new Set([...queueServers(settings).map(serverId), DOCUMENTS_LANE]);
 
+  // The images a reply draft waits for, so it knows what they show: those of the messages it answers, not read yet, while
+  // a server's queue may read them now (not at its rate limit, refused or without vision), and not longer than a while
+  const imagesToWait = (current: Db, draft: DraftRow, settings: StoredSettings, filter: PendingFilter) => {
+    if (!filter.kinds.includes('image') || Date.now() - draft.createdAt > DRAFT_IMAGE_WAIT_MS) {
+      return [];
+    }
+
+    const cloudAllowed = sourceCloudAllowed(draft.sourceId);
+    const readers = queueServers(settings).filter((server) => {
+      const key = serverId(server);
+
+      return imageModel(server) && (server.kind === 'ollama' || cloudAllowed) && !limitOn(key) && !refusalOn(key, server)
+        && Date.now() >= (noVisionUntil.get(key) ?? 0);
+    });
+
+    if (!readers.length) {
+      return [];
+    }
+
+    const { username } = readConfig(current, draft.sourceId);
+
+    return unreadImages(current, draft.sourceId, conversationOf(current, draft), username as string, filter.since);
+  };
+
   // A model's server not reached: its lane waits, and the status says so
   const notReached = (key: string) => {
     if (key !== DOCUMENTS_LANE && !Object.keys(CLOUD_NAMES).includes(key)) {
@@ -1318,8 +1344,34 @@ export const createKbService = (options: ServiceOptions) => {
           const images = server ? imageModel(server) : null;
           // F8: a cloud server takes only the work of sources that may go to cloud AI
           const cloudOnly = Boolean(server && server.kind !== 'ollama');
-          // Reply drafts first: they're waited for. While the background work is paused, only those asked for by hand
-          const draft = text ? nextWaitingDraft(current, { manualOnly: Boolean(activePause(settings)), exclude: [...claims.drafts], cloudOnly }) : undefined;
+          const filter = pendingFilter(settings);
+          const kinds = filter.kinds.filter((kind) => (kind === 'image' ? Boolean(images) && Date.now() >= (noVisionUntil.get(key) ?? 0) : key === DOCUMENTS_LANE));
+          const canRead = (file: AttachmentRow) => kinds.includes(file.kind) && !claims.files.has(`${file.sourceId}:${file.fileId}`)
+            && (!cloudOnly || sourceCloudAllowed(file.sourceId));
+          // Reply drafts first: they're waited for. While the background work is paused, only those asked for by hand. A
+          // draft whose messages have images not read yet waits for them: this lane reads one, or takes other work
+          const waitingForImages: number[] = [];
+          let draft: DraftRow | undefined;
+          let imageFirst: AttachmentRow | undefined;
+
+          while (text && !draft && !imageFirst) {
+            const next = nextWaitingDraft(current, {
+              manualOnly: Boolean(activePause(settings)), exclude: [...claims.drafts, ...waitingForImages], cloudOnly,
+            });
+
+            if (!next) {
+              break;
+            }
+
+            const unread = imagesToWait(current, next, settings, filter);
+            imageFirst = unread.find(canRead);
+
+            if (!unread.length) {
+              draft = next;
+            } else if (!imageFirst) {
+              waitingForImages.push(next.id);
+            }
+          }
 
           if (draft && text) {
             claims.drafts.add(draft.id);
@@ -1384,9 +1436,7 @@ export const createKbService = (options: ServiceOptions) => {
             continue;
           }
 
-          const filter = pendingFilter(settings);
-          const kinds = filter.kinds.filter((kind) => (kind === 'image' ? Boolean(images) && Date.now() >= (noVisionUntil.get(key) ?? 0) : key === DOCUMENTS_LANE));
-          const file = nextPending(current, { ...filter, kinds, exclude: [...claims.files], cloudOnly });
+          const file = imageFirst ?? nextPending(current, { ...filter, kinds, exclude: [...claims.files], cloudOnly });
 
           // No file waits: a series's meeting without a summary, unless that's off or paused
           if (!file) {
@@ -1528,6 +1578,11 @@ export const createKbService = (options: ServiceOptions) => {
             }
           } finally {
             claims.files.delete(fileKey);
+          }
+
+          // A draft that waited for it goes on, on whichever server's queue writes drafts
+          if (file.kind === 'image' && draftCounts(current).waiting) {
+            runBackground();
           }
 
           emitStatus();
